@@ -1,0 +1,22 @@
+﻿# Node
+node_modules/
+dist/
+build/
+.tmp/
+.cache/
+coverage/
+*.log
+
+# Env / secrets
+.env
+.env.*
+.supabase
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+
+# Vite/React
+vite.svg
+
+# Optional: keep your lockfile tracked (recommended)

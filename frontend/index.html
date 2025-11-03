@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Fishing AI — Phase B + My Stats (fixed)</title>
+<style>
+  :root{
+    --bg:#0f1115;--panel:#141925;--panel-2:#1a2130;--muted:#8ea1b2;--text:#e7eef7;
+    --brand:#4fc3f7;--brand-2:#7bd389;--ring:rgba(79,195,247,.45);--shadow:0 8px 28px rgba(0,0,0,.35);
+    --radius:14px;--gap:16px;--gap-lg:22px;
+  }
+  *{box-sizing:border-box} html,body{height:100%} body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 ui-sans-serif,system-ui,Segoe UI,Inter,Roboto,Arial}
+  .shell{max-width:1200px;margin:28px auto;padding:0 20px}
+  header.app{display:flex;align-items:center;gap:16px;margin-bottom:18px}
+  .brand{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:999px;background:linear-gradient(135deg,var(--panel-2),transparent);box-shadow:var(--shadow)}
+  .logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--brand),var(--brand-2))}
+  .brand h1{margin:0;font-size:18px}
+  .status{margin-left:auto;display:flex;gap:10px;align-items:center}
+  .badge{padding:6px 10px;border-radius:999px;background:var(--panel-2);color:var(--muted);border:1px solid rgba(255,255,255,.06);font-size:12px}
+  .badge.ok{color:#0f2;border-color:rgba(86,240,155,.35);background:rgba(86,240,155,.08)}
+  .grid{display:grid;gap:var(--gap-lg)} @media(min-width:980px){.grid{grid-template-columns:260px 1fr}}
+  .nav{position:sticky;top:18px;background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);padding:12px;box-shadow:var(--shadow)}
+  .nav h3{margin:6px 0 10px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.08);
+    background:linear-gradient(180deg,var(--panel-2),var(--panel));color:var(--text);cursor:pointer;user-select:none;transition:all .15s ease;font-weight:600}
+  .btn:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(0,0,0,.25),0 0 0 3px var(--ring)}
+  .btn.primary{background:linear-gradient(180deg,rgba(79,195,247,.25),rgba(79,195,247,.1));border-color:rgba(79,195,247,.45)}
+  .btn.block{width:100%;margin:6px 0} .btn.ghost{background:transparent;border-color:rgba(255,255,255,.12)}
+  .card{background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);box-shadow:var(--shadow)}
+  .card .hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06)}
+  .card .hd h2{margin:0;font-size:16px} .card .bd{padding:16px}
+  .row{display:flex;flex-wrap:wrap;gap:12px} .row .fld{flex:1 1 200px;min-width:180px}
+  input,textarea,select{width:100%;padding:11px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.08);background:var(--panel-2);color:var(--text);outline:none;font-size:14px}
+  input:focus,textarea:focus,select:focus{box-shadow:0 0 0 3px var(--ring)} textarea{min-height:110px;resize:vertical}
+  .muted{color:var(--muted)} .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .table{width:100%;border-collapse:separate;border-spacing:0 8px}
+  .table thead th{font-weight:700;color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.08em;text-align:left;padding:6px 10px}
+  .table tbody tr{background:var(--panel-2);border:1px solid rgba(255,255,255,.06)} .table tbody td{padding:10px}
+  .error{color:#ff8a8a}.good{color:#56f09b} footer{margin:28px 0 10px;color:var(--muted);text-align:center}
+
+  /* Stats widgets */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  @media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
+  .kpi{background:var(--panel-2);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:12px}
+  .kpi h4{margin:0 0 6px 0;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .kpi .v{font-size:22px;font-weight:800}
+  .chart{background:var(--panel-2);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px}
+  .grid2{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+  @media(max-width:980px){.grid2{grid-template-columns:1fr}}
+  .pill{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="app">
+    <div class="brand"><div class="logo"></div><h1>Fishing AI</h1></div>
+    <div class="status">
+      <span class="badge" id="offlineBadge" title="Offline queue size">Q:0</span>
+      <span class="badge" id="userEmailBadge">guest</span>
+      <span class="badge" id="apiBadge">API</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <aside class="nav">
+      <h3>Navigation</h3>
+      <button class="btn block" id="navCatch">Catch Log</button>
+      <button class="btn block" id="navStats">My Stats</button>
+      <button class="btn block" id="navPredict">Predict (3h)</button>
+      <button class="btn block" id="navPatterns">Patterns</button>
+      <button class="btn block" id="navRamps">Ramps & Fuel</button>
+      <button class="btn block" id="navUndersized">Undersized</button>
+      <button class="btn block" id="navWindy">Wind / Maps</button>
+      <button class="btn block primary" id="navAI">AI Chat</button>
+
+      <h3>Account (optional)</h3>
+      <div class="row"><div class="fld"><input id="userEmail" placeholder="you@email.com"/></div></div>
+      <div class="row" style="margin-top:6px">
+        <div class="fld"><button class="btn ghost" id="btnMagic">Send login link</button></div>
+        <div class="fld"><button class="btn ghost" id="btnSignOut">Sign out</button></div>
+      </div>
+      <div class="muted" style="margin-top:6px">If Supabase isn’t configured, login is disabled but the app still works.</div>
+    </aside>
+
+    <main>
+      <!-- Catch Log -->
+      <section class="card" id="panelCatch">
+        <div class="hd">
+          <h2>Catch Log</h2>
+          <div class="row" style="gap:8px">
+            <button class="btn" id="btnListCatches">Refresh</button>
+            <button class="btn" id="btnSync">Sync Offline</button>
+          </div>
+        </div>
+        <div class="bd">
+          <div class="row">
+            <div class="fld"><input id="catchSpecies" placeholder="Species (e.g., Snapper)"/></div>
+            <div class="fld"><input id="catchWeight" type="number" step="0.01" placeholder="Weight (kg)"/></div>
+            <div class="fld"><input id="catchLength" type="number" step="0.1" placeholder="Length (cm)"/></div>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <div class="fld"><input id="catchLat" type="number" step="0.0001" placeholder="Lat (-27.5)"/></div>
+            <div class="fld"><input id="catchLng" type="number" step="0.0001" placeholder="Lng (153.3)"/></div>
+            <div class="fld"><input id="catchNotes" placeholder="Notes"/></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn primary" id="btnAddCatch">Add Catch</button></div>
+          </div>
+          <div id="catchMsg" class="mono" style="margin-top:8px;"></div>
+          <table class="table" style="margin-top:12px">
+            <thead><tr><th>When</th><th>Species</th><th>Size</th><th>Coords</th><th>Notes</th></tr></thead>
+            <tbody id="catchRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- My Stats -->
+      <section class="card" id="panelStats" style="display:none;">
+        <div class="hd">
+          <h2>My Stats</h2>
+          <div class="row" style="gap:8px">
+            <button class="btn" id="btnRefreshStats">Refresh</button>
+            <button class="btn" id="btnExportCsv">Export CSV</button>
+            <span class="pill" id="statsCount">0 records</span>
+          </div>
+        </div>
+        <div class="bd">
+          <div class="kpis" id="kpiBar">
+            <div class="kpi"><h4>Total Catches</h4><div class="v" id="kpiTotal">0</div></div>
+            <div class="kpi"><h4>Unique Species</h4><div class="v" id="kpiSpecies">0</div></div>
+            <div class="kpi"><h4>Avg Length (cm)</h4><div class="v" id="kpiLen">–</div></div>
+            <div class="kpi"><h4>Avg Weight (kg)</h4><div class="v" id="kpiWgt">–</div></div>
+          </div>
+
+          <div class="grid2" style="margin-top:12px">
+            <div class="chart">
+              <h3 style="margin:0 0 8px 0;font-size:14px">Top Species</h3>
+              <div id="chartSpecies"></div>
+            </div>
+            <div class="chart">
+              <h3 style="margin:0 0 8px 0;font-size:14px">Trend (last 20 trips)</h3>
+              <svg id="chartTrend" width="100%" height="120"></svg>
+            </div>
+          </div>
+
+          <div class="chart" style="margin-top:12px">
+            <h3 style="margin:0 0 8px 0;font-size:14px">Hot Zones (approximate)</h3>
+            <div id="hotZones" class="mono" style="white-space:pre-wrap"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Predict -->
+      <section class="card" id="panelPredict" style="display:none;">
+        <div class="hd"><h2>Predict — next 3 hours (MVP)</h2></div>
+        <div class="bd">
+          <div class="row">
+            <div class="fld"><input id="predSpecies" placeholder="Species (optional)"/></div>
+            <div class="fld"><input id="predLat" type="number" step="0.0001" value="-27.48"/></div>
+            <div class="fld"><input id="predLng" type="number" step="0.0001" value="153.12"/></div>
+            <div class="fld"><input id="predRadius" type="number" step="1" value="5" placeholder="Radius km"/></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn primary" id="btnPredict">Predict</button></div>
+          </div>
+          <div id="predOut" class="mono" style="margin-top:10px;white-space:pre-wrap;"></div>
+        </div>
+      </section>
+
+      <!-- Patterns -->
+      <section class="card" id="panelPatterns" style="display:none;">
+        <div class="hd"><h2>Patterns (beta)</h2></div>
+        <div class="bd">
+          <div class="row">
+            <div class="fld"><input id="patSpecies" placeholder="Species (e.g., Snapper)"/></div>
+            <div class="fld"><input id="patArea" placeholder="Area label (optional)"/></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnGetPatterns">Analyze</button></div>
+          </div>
+          <div id="patternsOut" class="mono" style="margin-top:10px;white-space:pre-wrap;"></div>
+        </div>
+      </section>
+
+      <!-- Ramps & Fuel -->
+      <section class="card" id="panelRamps" style="display:none;">
+        <div class="hd"><h2>Ramps & Fuel</h2></div>
+        <div class="bd">
+          <div class="row">
+            <div class="fld"><input id="placeLocation" placeholder="e.g., Manly, QLD"/></div>
+            <div class="fld"><input id="placeRadius" type="number" step="1" value="20" placeholder="Radius (km)"/></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnFindRamps">Find Ramps</button></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnFindFuel">Find Fuel</button></div>
+          </div>
+          <div id="placeMsg" class="mono" style="margin-top:8px;"></div>
+          <table class="table" style="margin-top:12px">
+            <thead><tr><th>Name</th><th>Address</th><th>Type</th></tr></thead>
+            <tbody id="placeRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Undersized -->
+      <section class="card" id="panelUndersized" style="display:none;">
+        <div class="hd"><h2>Undersized Monitoring (beta)</h2></div>
+        <div class="bd">
+          <div class="row">
+            <div class="fld"><input id="uSpecies" placeholder="Species"/></div>
+            <div class="fld"><input id="uArea" placeholder="Area label (optional)"/></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnUndersized">Get Metrics</button></div>
+          </div>
+          <div id="undersizedOut" class="mono" style="margin-top:10px;white-space:pre-wrap;"></div>
+        </div>
+      </section>
+
+      <!-- Wind / Maps -->
+      <section class="card" id="panelWindy" style="display:none;">
+        <div class="hd"><h2>Wind / Marine Maps</h2></div>
+        <div class="bd">
+          <div class="row">
+            <div class="fld">
+              <select id="mapProvider">
+                <option value="windy" selected>Windy (wind/waves)</option>
+                <option value="meteo">Meteoblue (alternative)</option>
+              </select>
+            </div>
+            <div class="fld"><input id="windyLat" type="number" step="0.01" value="-27.48"/></div>
+            <div class="fld"><input id="windyLng" type="number" step="0.01" value="153.12"/></div>
+            <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnWindy">Update</button></div>
+          </div>
+          <div style="margin-top:10px;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.06)">
+            <iframe id="mapFrame" src="https://embed.windy.com/embed2.html?lat=-27.48&lon=153.12&detailLat=-27.48&detailLon=153.12&zoom=8&level=surface&overlay=wind"
+                    style="width:100%;height:420px;border:0"></iframe>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI Chat -->
+      <section class="card" id="panelAI" style="display:none;">
+        <div class="hd"><h2>AI Chat</h2></div>
+        <div class="bd">
+          <div class="row"><div class="fld"><textarea id="aiPrompt" placeholder="Ask Fishing AI… Include sources."></textarea></div></div>
+          <div class="row" style="margin-top:8px">
+            <div class="fld" style="flex:0 0 auto"><button class="btn primary" id="btnAskSmart">Ask (Smart)</button></div>
+            <div class="fld" style="flex:0 0 auto">
+              <details><summary>Advanced AI Tools</summary>
+                <div class="row" style="margin-top:10px">
+                  <button class="btn ghost" id="btnWebLearn">Web Learn (fetch)</button>
+                  <button class="btn ghost" id="btnBuildEmb">Build Embeddings (noop)</button>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div class="fld"><input id="memUrl" placeholder="https://… (save page to memory)"/></div>
+                  <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnSaveUrl">Save URL → Memory</button></div>
+                </div>
+                <div class="row" style="margin-top:10px">
+                  <div class="fld" style="flex:0 0 auto"><button class="btn" id="btnLearnCatches">Learn from Catches</button></div>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div id="aiOut" class="mono" style="margin-top:12px;white-space:pre-wrap;"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer>© Fishing AI</footer>
+</div>
+
+<script src="https://esm.sh/@supabase/supabase-js@2.45.4"></script>
+<script>
+  const API = 'http://127.0.0.1:4000';
+  const SUPABASE_URL = '';      // optional to enable login
+  const SUPABASE_ANON_KEY = ''; // optional to enable login
+  const $ = (id)=>document.getElementById(id);
+
+  // Health badge
+  (async ()=>{ try { const r=await fetch(API+'/health'); if(r.ok) $('apiBadge').classList.add('ok'); } catch{} })();
+
+  // Panels
+  const panels = {
+    navCatch:'panelCatch', navStats:'panelStats', navPredict:'panelPredict', navPatterns:'panelPatterns',
+    navRamps:'panelRamps', navUndersized:'panelUndersized', navWindy:'panelWindy', navAI:'panelAI'
+  };
+  function showPanel(id){ Object.values(panels).forEach(p=>{ const el=$(p); if(el) el.style.display=(p===id)?'block':'none'; }); }
+  Object.keys(panels).forEach(k=>{ const b=$(k); if(b) b.addEventListener('click', ()=>{ showPanel(panels[k]); if(panels[k]==='panelStats') refreshStats(); }); });
+  showPanel('panelCatch');
+
+  // Optional auth
+  let sb=null, authEnabled=false;
+  try{ if (typeof window.supabase!=='undefined' && SUPABASE_URL && SUPABASE_ANON_KEY) { sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY); authEnabled=true; } }catch{}
+  const emailEl=$('userEmail'), emailBadge=$('userEmailBadge');
+  const offBadge=$('offlineBadge');
+  function syncBadge(v){ emailBadge.textContent=v||'guest'; }
+  emailEl.addEventListener('input',()=>syncBadge(emailEl.value)); syncBadge(emailEl.value);
+  (async ()=>{ if(!authEnabled) return; const {data}=await sb.auth.getUser(); if(data?.user?.email){ emailEl.value=data.user.email; syncBadge(data.user.email); }
+    sb.auth.onAuthStateChange((_e,s)=>{ const em=s?.user?.email; if(em){ emailEl.value=em; syncBadge(em); }});
+  })();
+  $('btnMagic').addEventListener('click', async ()=>{
+    if(!authEnabled){ alert('Login disabled (no Supabase URL/key). App still works.'); return; }
+    const email=emailEl.value.trim(); if(!email) return alert('Enter your email'); const out=$('catchMsg'); out.textContent='Sending magic link…';
+    try{ const { error } = await sb.auth.signInWithOtp({ email, options:{ emailRedirectTo:location.origin, shouldCreateUser:true }}); if(error) throw error;
+      out.innerHTML='<span class="good">Check inbox for link.</span>'; alert('Magic link sent.'); }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; alert('Auth error: '+(e?.message||e)); }
+  });
+  $('btnSignOut').addEventListener('click', async ()=>{
+    if(!authEnabled){ emailEl.value=''; syncBadge(''); alert('Signed out locally.'); return; }
+    try{ await sb.auth.signOut(); }catch{} emailEl.value=''; syncBadge(''); alert('Signed out.');
+  });
+  async function currentEmail(){ if(emailEl.value) return emailEl.value; if(!authEnabled) return 'guest@example.com'; try{ const {data}=await sb.auth.getUser(); return data?.user?.email||'guest@example.com'; }catch{ return 'guest@example.com'; } }
+
+  // Offline queue
+  const QKEY='catchQueue';
+  const getQ=()=>{ try{ return JSON.parse(localStorage.getItem(QKEY)||'[]'); }catch{ return []; } }
+  const setQ=(a)=>{ localStorage.setItem(QKEY, JSON.stringify(a)); offBadge.textContent='Q:'+a.length; }
+  setQ(getQ());
+
+  // ---- Catch Log ----
+  async function listCatches(){
+    const rows=$('catchRows'); rows.innerHTML='<tr><td class="muted" colspan="5">Loading…</td></tr>';
+    try{
+      const r=await fetch(API+'/catches'); const j=await r.json();
+      if(!r.ok||!Array.isArray(j)) throw new Error(j?.error||('HTTP '+r.status));
+      // cache for stats
+      window._catches = j;
+      $('statsCount').textContent = `${j.length} records`;
+
+      rows.innerHTML=j.map(c=>{
+        const when=new Date(c.created_at||Date.now()).toLocaleString();
+        const size=[c.weight_kg?`${c.weight_kg}kg`:null,c.length_cm?`${c.length_cm}cm`:null].filter(Boolean).join(' / ');
+        const pos=(c.lat!=null&&c.lng!=null)?`${(c.lat?.toFixed?.(4)??c.lat)}, ${(c.lng?.toFixed?.(4)??c.lng)}`:'';
+        return `<tr><td>${when}</td><td>${c.species||''}</td><td>${size||''}</td><td>${pos}</td><td>${c.notes||''}</td></tr>`;
+      }).join('')||'<tr><td class="muted" colspan="5">No catches yet.</td></tr>';
+    }catch(e){ rows.innerHTML=`<tr><td colspan="5" class="error">Error: ${e?.message||e}</td></tr>`; }
+  }
+  $('btnListCatches').addEventListener('click', listCatches);
+
+  // Add Catch: GPS one-shot + env snapshot + queue-safe
+  $('btnAddCatch').addEventListener('click', async ()=>{
+    const msg = $('catchMsg'); msg.textContent='Saving…';
+    let lat = $('catchLat').value ? Number($('catchLat').value) : null;
+    let lng = $('catchLng').value ? Number($('catchLng').value) : null;
+
+    if (lat==null || isNaN(lat) || lng==null || isNaN(lng)) {
+      try {
+        msg.textContent = '📡 Getting GPS…';
+        const pos = await new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy:true, timeout:8000 })
+        );
+        lat = pos.coords.latitude; lng = pos.coords.longitude;
+        $('catchLat').value = lat.toFixed(5); $('catchLng').value = lng.toFixed(5);
+      } catch(e) {
+        msg.innerHTML = '<span class="error">📍 GPS unavailable — allow location or enter coords.</span>';
+        return;
+      }
+    }
+
+    const body = {
+      user_email: await currentEmail(),
+      species: $('catchSpecies').value.trim(),
+      weight_kg: Number($('catchWeight').value||0)||null,
+      length_cm: Number($('catchLength').value||0)||null,
+      lat, lng,
+      notes: $('catchNotes').value.trim() || null,
+      created_at: new Date().toISOString(),
+    };
+    if (!body.species){ msg.innerHTML='<span class="error">Species required</span>'; return; }
+
+    let envSummary = '';
+    try {
+      const env = await saveEnvSnapshot(lat, lng);
+      if (env) {
+        const wind = (env.wind_kts ?? env.wind_speed_kts ?? env.wind ?? '–');
+        const sst  = (env.sst_c ?? env.sea_temp_c ?? env.temp_c ?? '–');
+        envSummary = ` (wind ${wind} kts, sst ${sst}°C)`;
+      }
+    } catch(_) {}
+
+    try{
+      const r=await fetch(API+'/catches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      msg.innerHTML='<span class="good">Saved ✅'+envSummary+'</span>'; listCatches();
+    }catch(e){
+      const q=getQ(); q.push(body); setQ(q);
+      msg.innerHTML=`<span class="error">Offline — queued (${q.length}).</span>`;
+    }
+  });
+
+  $('btnSync').addEventListener('click', async ()=>{
+    const q=getQ(); if(!q.length){ alert('Queue empty'); return; }
+    try{
+      const r=await fetch(API+'/queue/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:q})});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      setQ([]); alert(`Synced ${j.inserted} items`); listCatches();
+    }catch(e){ alert('Sync failed: '+(e?.message||e)); }
+  });
+
+  listCatches();
+
+  // ---- My Stats (client-side) ----
+  function round(val, places){ const p=Math.pow(10,places); return Math.round((val??0)*p)/p; }
+
+  function computeStats(data){
+    const out = { total:0, speciesSet:new Set(), lenSum:0, lenN:0, wgtSum:0, wgtN:0, speciesCounts:{}, trend:[], zones:{} };
+    const sorted = [...data].sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+    for(const c of sorted){
+      out.total++;
+      if(c.species){ out.speciesSet.add(c.species); out.speciesCounts[c.species]=(out.speciesCounts[c.species]||0)+1; }
+      if(c.length_cm!=null){ out.lenSum += Number(c.length_cm)||0; out.lenN++; }
+      if(c.weight_kg!=null){ out.wgtSum += Number(c.weight_kg)||0; out.wgtN++; }
+      if(c.created_at){ out.trend.push({ t:new Date(c.created_at).getTime(), v:1 }); }
+      if(c.lat!=null && c.lng!=null){
+        const key = `${round(c.lat,2)},${round(c.lng,2)}`;
+        out.zones[key]=(out.zones[key]||0)+1;
+      }
+    }
+    return out;
+  }
+
+  function renderBar(containerId, items, maxBars=6){
+    const el = $(containerId);
+    const arr = Object.entries(items||{}).sort((a,b)=>b[1]-a[1]).slice(0,maxBars);
+    if(!arr.length){ el.innerHTML = '<div class="muted">No data yet.</div>'; return; }
+    const max = Math.max(...arr.map(x=>x[1]));
+    el.innerHTML = arr.map(([name,val])=>{
+      const w = Math.max(6, Math.round((val/max)*100));
+      return `
+        <div style="display:flex;align-items:center;gap:8px;margin:6px 0">
+          <div style="width:120px" class="mono">${name}</div>
+          <div style="flex:1;background:rgba(255,255,255,.06);border-radius:8px;overflow:hidden;">
+            <div style="width:${w}%;height:12px;background:linear-gradient(90deg, var(--brand), var(--brand-2));"></div>
+          </div>
+          <div style="width:34px;text-align:right" class="mono">${val}</div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderSparkline(svgId, pointsMax20){
+    const svg = $(svgId);
+    const w = svg.clientWidth || 560, h = svg.clientHeight || 120, pad = 8;
+    svg.innerHTML='';
+    if(!pointsMax20.length){ return; }
+    // bucket by day & take last 20 non-empty buckets
+    const byDay = {};
+    for(const p of pointsMax20){ const d=new Date(p.t); const k=(new Date(d.getFullYear(),d.getMonth(),d.getDate())).getTime(); byDay[k]=(byDay[k]||0)+p.v; }
+    const xs = Object.keys(byDay).map(k=>({t:Number(k),v:byDay[k]})).sort((a,b)=>a.t-b.t).slice(-20);
+    const max = Math.max(...xs.map(x=>x.v),1);
+    const minT = xs[0].t, maxT = xs[xs.length-1].t || (minT+1);
+    const scaleX = t => pad + ( (t-minT)/(maxT-minT||1) ) * (w-2*pad);
+    const scaleY = v => h-pad - (v/max)*(h-2*pad);
+    const path = xs.map((p,i)=>`${i?'L':'M'}${scaleX(p.t)},${scaleY(p.v)}`).join(' ');
+    const gridY = scaleY(0);
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    const base = document.createElementNS('http://www.w3.org/2000/svg','line');
+    base.setAttribute('x1', String(pad)); base.setAttribute('x2', String(w-pad));
+    base.setAttribute('y1', String(gridY)); base.setAttribute('y2', String(gridY));
+    base.setAttribute('stroke','rgba(255,255,255,.15)'); base.setAttribute('stroke-width','1');
+    const pth = document.createElementNS('http://www.w3.org/2000/svg','path');
+    pth.setAttribute('d', path); pth.setAttribute('fill','none'); pth.setAttribute('stroke','url(#g1)'); pth.setAttribute('stroke-width','2');
+    const grad = document.createElementNS('http://www.w3.org/2000/svg','linearGradient');
+    grad.setAttribute('id','g1'); grad.setAttribute('x1','0'); grad.setAttribute('x2','1'); grad.setAttribute('y1','0'); grad.setAttribute('y2','0');
+    const s1=document.createElementNS('http://www.w3.org/2000/svg','stop'); s1.setAttribute('offset','0%'); s1.setAttribute('stop-color','var(--brand)');
+    const s2=document.createElementNS('http://www.w3.org/2000/svg','stop'); s2.setAttribute('offset','100%'); s2.setAttribute('stop-color','var(--brand-2)');
+    grad.appendChild(s1); grad.appendChild(s2);
+    const defs=document.createElementNS('http://www.w3.org/2000/svg','defs'); defs.appendChild(grad);
+    g.appendChild(defs); g.appendChild(base); g.appendChild(pth); svg.appendChild(g);
+  }
+
+  function renderZones(containerId, zonesObj){
+    const el=$(containerId);
+    const arr = Object.entries(zonesObj||{}).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    if(!arr.length){ el.textContent='No GPS data yet.'; return; }
+    el.textContent = arr.map(([k,v],i)=>`${i+1}. ${k}  —  ${v} hits`).join('\n');
+  }
+
+  async function refreshStats(forceFetch=false){
+    try{
+      if(forceFetch || !Array.isArray(window._catches)) {
+        const r=await fetch(API+'/catches'); const j=await r.json();
+        if(!r.ok||!Array.isArray(j)) throw new Error(j?.error||('HTTP '+r.status));
+        window._catches = j;
+      }
+      const data = window._catches || [];
+      $('statsCount').textContent = `${data.length} records`;
+
+      const s = computeStats(data);
+      $('kpiTotal').textContent   = s.total;
+      $('kpiSpecies').textContent = s.speciesSet.size;
+      $('kpiLen').textContent     = s.lenN ? (s.lenSum/s.lenN).toFixed(1) : '–';
+      $('kpiWgt').textContent     = s.wgtN ? (s.wgtSum/s.wgtN).toFixed(2) : '–';
+
+      renderBar('chartSpecies', s.speciesCounts, 6);
+      renderSparkline('chartTrend', s.trend);
+      renderZones('hotZones', s.zones);
+    }catch(e){
+      console.error(e);
+      alert('Stats error: '+(e?.message||e));
+    }
+  }
+  $('btnRefreshStats').addEventListener('click', ()=>refreshStats(true));
+
+  $('btnExportCsv').addEventListener('click', ()=>{
+    const rows = (window._catches||[]);
+    if(!rows.length){ alert('No data to export'); return; }
+    const cols = ['created_at','species','weight_kg','length_cm','lat','lng','notes','user_email','id'];
+    const csv = [cols.join(',')].concat(rows.map(r=>cols.map(k=>{
+      const v = r[k]==null?'':String(r[k]).replace(/"/g,'""');
+      return `"${v}"`;
+    }).join(','))).join('\n');
+    const blob = new Blob([csv],{type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download='catches.csv'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  });
+
+  // ---- Predict ----
+  $('btnPredict').addEventListener('click', async ()=>{
+    const out=$('predOut'); out.textContent='Predicting…';
+    const species=$('predSpecies').value.trim();
+    const lat=Number($('predLat').value||-27.48);
+    const lng=Number($('predLng').value||153.12);
+    const radius_km=Number($('predRadius').value||5);
+    const qs=new URLSearchParams({ lat:String(lat), lng:String(lng), radius_km:String(radius_km) });
+    if (species) qs.set('species', species);
+    try{
+      const r=await fetch(API+'/predict/now?'+qs.toString());
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      const lines=(j.cells||[]).slice(0,50).map(c=>`${c.score.toFixed(2)} — ${c.lat.toFixed(5)},${c.lng.toFixed(5)} (${c.hits} hits, ${c.undersized} undersized) ${c.note}`).join('\n');
+      out.textContent = `Center: ${j.center.lat.toFixed(5)},${j.center.lng.toFixed(5)}  radius=${j.radius_km}km  species=${j.species||'ANY'}\nTop cells:\n${lines||'(no signal — log catches first!)'}`;
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+
+  // ---- Patterns ----
+  $('btnGetPatterns').addEventListener('click', async ()=>{
+    const out=$('patternsOut'); out.textContent='Analyzing…';
+    const qs=new URLSearchParams(); const s=$('patSpecies').value.trim(); if(s) qs.set('species',s);
+    const a=$('patArea').value.trim(); if(a) qs.set('area',a);
+    try{ const r=await fetch(API+'/patterns?'+qs.toString()); const j=await r.json(); if(!r.ok) throw new Error(j?.error||('HTTP '+r.status)); out.textContent=JSON.stringify(j,null,2); }
+    catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+
+  // ---- Places ----
+  async function searchPlaces(kind){
+    const msg=$('placeMsg'), rows=$('placeRows'); msg.textContent='Searching…'; rows.innerHTML='';
+    const location=$('placeLocation').value.trim(); const radius_km=Number($('placeRadius').value||20);
+    const qs=new URLSearchParams({location, radius_km:String(radius_km)});
+    try{
+      const r=await fetch(API+`/places/${kind}?`+qs.toString());
+      const j=await r.json(); if(!r.ok) throw new Error(j?.error||('HTTP '+r.status));
+      const list=j?.results||j||[];
+      rows.innerHTML=list.map(x=>{
+        const name=x.name||x.title||'Unknown';
+        const addr=x.address||x.formatted_address||'';
+        return `<tr><td>${name}</td><td>${addr}</td><td>${kind}</td></tr>`;
+      }).join('')||'<tr><td colspan="3" class="muted">No results.</td></tr>';
+      msg.textContent=`Found ${list.length} (${j?.provider||'OSM'})`;
+    }catch(e){ msg.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  }
+  $('btnFindRamps').addEventListener('click', ()=>searchPlaces('ramps'));
+  $('btnFindFuel').addEventListener('click', ()=>searchPlaces('fuel'));
+
+  // ---- Undersized ----
+  $('btnUndersized').addEventListener('click', async ()=>{
+    const out=$('undersizedOut'); out.textContent='Computing…';
+    const qs=new URLSearchParams(); const s=$('uSpecies').value.trim(); if(s) qs.set('species',s);
+    const a=$('uArea').value.trim(); if(a) qs.set('area',a);
+    try{
+      const r=await fetch(API+'/undersized?'+qs.toString());
+      const j=await r.json(); if(!r.ok) throw new Error(j?.error||('HTTP '+r.status));
+      out.textContent=JSON.stringify(j,null,2);
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+
+  // ---- Windy simple (inside Maps section) ----
+  function windy(lat,lon){ return `https://embed.windy.com/embed2.html?lat=${lat}&lon=${lon}&detailLat=${lat}&detailLon=${lon}&zoom=8&level=surface&overlay=wind`; }
+  function meteo(lat,lon){ return `https://www.meteoblue.com/en/weather/maps/widget?target=map_simple&lat=${lat}&lon=${lon}&zoom=8&layer=wind_10m_mean&time=now`; }
+  $('btnWindy').addEventListener('click', ()=>{
+    const lat=Number($('windyLat').value||-27.48), lon=Number($('windyLng').value||153.12);
+    const provider=$('mapProvider').value; $('mapFrame').src = (provider==='meteo') ? meteo(lat,lon) : windy(lat,lon);
+  });
+
+  // ---- AI ----
+  function sourcesFmt(s){ if(!s||!s.length) return ''; return '\n\nSources:\n'+s.map((x,i)=>` ${i+1}. ${x.title} — ${x.url}`).join('\n'); }
+  $('btnAskSmart').addEventListener('click', async ()=>{
+    const out=$('aiOut'); out.textContent='Thinking…';
+    const prompt=$('aiPrompt').value.trim();
+    try{
+      const r=await fetch(API+'/ai/chat/smart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,k:8})});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      out.textContent=(j.answer||'(no answer)')+sourcesFmt(j.sources);
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+  $('btnWebLearn').addEventListener('click', async ()=>{
+    const out=$('aiOut'); out.textContent='Learning from web…';
+    const prompt=($('aiPrompt').value||'Queensland snapper size limit').trim();
+    try{
+      const r=await fetch(API+'/ai/web/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q:prompt,num:3})});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      out.textContent='Learned (not saved):\n'+JSON.stringify(j.learned||j,null,2);
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+  $('btnBuildEmb').addEventListener('click', async ()=>{
+    const out=$('aiOut'); out.textContent='Embedding missing chunks…';
+    try{
+      const r=await fetch(API+'/ai/embeddings/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:100})});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      out.textContent='Embedded: '+(j.embedded??0);
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+  $('btnSaveUrl').addEventListener('click', async ()=>{
+    const out=$('aiOut'); const url=$('memUrl').value.trim(); if(!url){ out.innerHTML='<span class="error">Enter a URL first.</span>'; return; }
+    out.textContent='Saving page to memory…';
+    try{
+      const r=await fetch(API+'/ai/memory/add-url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      out.textContent=`Saved URL to memory (id: ${j.id}, chars: ${j.chars}).`;
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+  $('btnLearnCatches').addEventListener('click', async ()=>{
+    const out=$('aiOut'); out.textContent='Learning from recent catches…';
+    try{
+      const r=await fetch(API+'/ai/memory/learn-from-catches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:50})});
+      const j=await r.json(); if(!r.ok||!j?.success) throw new Error(j?.error||('HTTP '+r.status));
+      out.textContent=`Learned ${j.added||0} memories from catches.`;
+    }catch(e){ out.innerHTML=`<span class="error">${e?.message||e}</span>`; }
+  });
+</script>
+
+<!-- ===== Windy Live Panel (safe add-on) ===== -->
+<section id="windy-panel" style="font-family: ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial; background:#0b1220; color:#e6edf3; border-top:1px solid #1e2a3a; padding:16px 12px; margin-top:24px;">
+  <h2 style="margin:0 0 12px 0; font-size:18px; font-weight:600;">🌬️ Windy Live Weather (visual) + Smart Predict</h2>
+
+  <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+    <label style="display:flex; flex-direction:column; gap:4px;">
+      <span>Latitude</span>
+      <input id="windy-lat" type="number" step="0.0001" value="-27.48" style="background:#0f172a; color:#e6edf3; border:1px solid #24324a; border-radius:8px; padding:8px; width:140px;">
+    </label>
+
+    <label style="display:flex; flex-direction:column; gap:4px;">
+      <span>Longitude</span>
+      <input id="windy-lng" type="number" step="0.0001" value="153.12" style="background:#0f172a; color:#e6edf3; border:1px solid #24324a; border-radius:8px; padding:8px; width:140px;">
+    </label>
+
+    <label style="display:flex; flex-direction:column; gap:4px;">
+      <span>Overlay</span>
+      <select id="windy-overlay" style="background:#0f172a; color:#e6edf3; border:1px solid #24324a; border-radius:8px; padding:8px; width:160px;">
+        <option value="wind" selected>Wind</option>
+        <option value="waves">Waves</option>
+        <option value="clouds">Clouds</option>
+        <option value="rain">Rain</option>
+        <option value="temp">Temperature</option>
+      </select>
+    </label>
+
+    <button id="windy-update" style="background:#2563eb; color:white; border:none; border-radius:8px; padding:10px 14px; cursor:pointer;">
+      Update Map
+    </button>
+
+    <button id="btn-fetch-env" style="background:#16a34a; color:white; border:none; border-radius:8px; padding:10px 14px; cursor:pointer;">
+      Fetch Live Conditions (save)
+    </button>
+
+    <button id="btn-predict" style="background:#9333ea; color:white; border:none; border-radius:8px; padding:10px 14px; cursor:pointer;">
+      Predict Now (5 km)
+    </button>
+  </div>
+
+  <div style="margin-top:12px; border:1px solid #1e2a3a; border-radius:10px; overflow:hidden;">
+    <iframe id="windy-embed" title="Windy"
+      style="width:100%; height:420px; border:0;"
+      src="https://embed.windy.com/embed2.html?lat=-27.48&lon=153.12&detailLat=-27.48&detailLon=153.12&width=100%&height=420&zoom=9&level=surface&overlay=wind&product=ecmwf&menu=&message=&marker=true&calendar=&pressure=&type=map&location=coordinates&detail=true">
+    </iframe>
+  </div>
+
+  <div id="windy-log" style="white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0f172a; color:#e6edf3; border:1px solid #1e2a3a; border-radius:8px; padding:10px; margin-top:10px;">
+    Ready. Use the buttons above to save live conditions and run a prediction.
+  </div>
+</section>
+
+<!-- Auto-save a live environment snapshot (non-blocking, safe) -->
+<script>
+async function saveEnvSnapshot(lat, lng) {
+  try {
+    const url = `${API}/env/fetch/auto?lat=${lat}&lng=${lng}&save=1`;
+    const res = await fetch(url);
+    const j = await res.json();
+    if (j?.success) return j.obs || {};
+  } catch (_) {}
+  return null;
+}
+</script>
+
+<script>
+(function(){
+  const latEl = document.getElementById('windy-lat');
+  const lngEl = document.getElementById('windy-lng');
+  const ovlEl = document.getElementById('windy-overlay');
+  const iframe = document.getElementById('windy-embed');
+  const logEl = document.getElementById('windy-log');
+
+  function log(msg){ logEl.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`; }
+
+  function updateMap(){
+    const lat = Number(latEl.value), lng = Number(lngEl.value);
+    const overlay = ovlEl.value || 'wind';
+    const base = 'https://embed.windy.com/embed2.html';
+    const params = new URLSearchParams({
+      lat: String(lat), lon: String(lng),
+      detailLat: String(lat), detailLon: String(lng),
+      width: '100%', height: '420',
+      zoom: '9', level: 'surface', overlay, product: 'ecmwf',
+      menu: '', message: '', marker: 'true', calendar:'', pressure:'',
+      type:'map', location:'coordinates', detail:'true'
+    });
+    iframe.src = `${base}?${params.toString()}`;
+    log(`Windy map set to lat=${lat.toFixed(3)}, lng=${lng.toFixed(3)}, overlay=${overlay}`);
+  }
+
+  async function fetchEnv(){
+    const lat = Number(latEl.value), lng = Number(lngEl.value);
+    try{
+      const u = `${API}/env/fetch/auto?lat=${lat}&lng=${lng}&save=1`;
+      const r = await fetch(u);
+      const j = await r.json();
+      if(j?.success){
+        const o = j.obs || {};
+        log(`Saved env tick: wind=${o.wind_kts ?? '—'} kts, sst=${o.sst_c ?? '—'} °C, pressure=${o.pressure_hpa ?? '—'} hPa`);
+      }else{
+        log(`Fetch env failed: ${j?.error || 'Unknown error'}`);
+      }
+    }catch(e){ log(`Fetch env error: ${e?.message||e}`); }
+  }
+
+  async function predictNow(){
+    const lat = Number(latEl.value), lng = Number(lngEl.value);
+    try{
+      const r = await fetch(`${API}/predict/now?lat=${lat}&lng=${lng}&radius_km=5`);
+      const j = await r.json();
+      if(j?.success){
+        const cells = j.cells || [];
+        const top = cells.slice(0,5).map((c,i)=>`${i+1}. score=${c.score} @ (${c.lat.toFixed(3)}, ${c.lng.toFixed(3)})`).join('\n');
+        log(`Prediction OK. Top cells:\n${top || 'none'}`);
+      }else{
+        log(`Predict failed: ${j?.error || 'Unknown error'}`);
+      }
+    }catch(e){ log(`Predict error: ${e?.message||e}`); }
+  }
+
+  document.getElementById('windy-update').addEventListener('click', updateMap);
+  document.getElementById('btn-fetch-env').addEventListener('click', fetchEnv);
+  document.getElementById('btn-predict').addEventListener('click', predictNow);
+
+  // init
+  updateMap();
+})();
+</script>
+
+<!-- Auto GPS for Catch Log -->
+<script>
+(function(){
+  const latField = document.getElementById('catchLat');
+  const lngField = document.getElementById('catchLng');
+  const msg = document.getElementById('catchMsg');
+
+  if (!navigator.geolocation) {
+    msg.innerHTML = '<span class="error">⚠️ GPS not supported on this device.</span>';
+    return;
+  }
+  function update(lat, lng) {
+    latField.value = (+lat).toFixed(5);
+    lngField.value = (+lng).toFixed(5);
+  }
+  function error(err) {
+    console.warn('GPS error:', err);
+    // keep quiet; user can enter manually
+  }
+  const options = { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 };
+  navigator.geolocation.watchPosition(pos => {
+    const { latitude, longitude } = pos.coords;
+    update(latitude, longitude);
+  }, error, options);
+})();
+</script>
+
+</body>
+</html>

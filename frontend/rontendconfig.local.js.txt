@@ -1,0 +1,3 @@
+// frontend/config.local.js
+export const SUPABASE_URL = https://etouudgphuvwcflramcn.supabase.co
+export const SUPABASE_ANON_KEY = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV0b3V1ZGdwaHV2d2NmbHJhbWNuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc4ODg2OTIsImV4cCI6MjA3MzQ2NDY5Mn0.cA-u54EhC289DNJR8h2FtTucE4jKMWTu4UCnrCK_FWI
