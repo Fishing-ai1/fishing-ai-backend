@@ -13,7 +13,7 @@
 import { config as dotenv } from "dotenv";
 dotenv();
 
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-05-10_BETA_NO_SATELLITE_NO_TACTICAL";
+const BUILD_ID = "OC_BACKEND_2026-05-20_BETA_CORE_CLEANUP";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -33,6 +33,17 @@ function envValue(name: string) {
   // Treat starter placeholder strings as empty so health checks do not show false success.
   if (!value || /^your[-_ ]/i.test(value)) return "";
   return value;
+}
+
+function normalizeOriginValue(value: string) {
+  return String(value || "").trim().replace(/\/$/, "");
+}
+
+function csvEnv(value: string) {
+  return String(value || "")
+    .split(",")
+    .map(normalizeOriginValue)
+    .filter(Boolean);
 }
 
 const SUPABASE_URL = envValue("SUPABASE_URL");
@@ -47,19 +58,6 @@ const WINDY_KEY_SOURCE = envValue("WINDY_POINT_FORECAST_KEY")
   : envValue("WEATHER_API_KEY")
   ? "WEATHER_API_KEY"
   : "missing";
-// Optional future raw-data processing token. NASA GIBS visual tiles do not need this.
-// Keep this backend-only. Never put it in the frontend.
-const EARTHDATA_BEARER_TOKEN = envValue("EARTHDATA_BEARER_TOKEN") || envValue("NASA_EARTHDATA_TOKEN");
-// Live ocean numeric data. Default SST uses NOAA CoastWatch ERDDAP MUR SST.
-// Chlorophyll/currents/depth are intentionally optional because those providers differ by account/region.
-// Add these when you have the provider details and OceanCore will ingest them without frontend changes.
-const NOAA_MUR_SST_ERDDAP_BASE = envValue("NOAA_MUR_SST_ERDDAP_BASE") || "https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41";
-const NOAA_MUR_SST_VARIABLE = envValue("NOAA_MUR_SST_VARIABLE") || "analysed_sst";
-const NOAA_CHL_ERDDAP_BASE = envValue("NOAA_CHL_ERDDAP_BASE");
-const NOAA_CHL_VARIABLE = envValue("NOAA_CHL_VARIABLE") || "chlorophyll";
-const COPERNICUS_CURRENT_ENDPOINT = envValue("COPERNICUS_CURRENT_ENDPOINT");
-const GEBCO_DEPTH_ENDPOINT = envValue("GEBCO_DEPTH_ENDPOINT");
-const OCEAN_DATA_TIMEOUT_MS = Number(process.env.OCEAN_DATA_TIMEOUT_MS || 6500);
 
 const CATCHES_TABLE = process.env.CATCHES_TABLE || "catches";
 const PROFILES_TABLE = process.env.PROFILES_TABLE || "profiles";
@@ -67,8 +65,9 @@ const FEEDBACK_TABLE = process.env.FEEDBACK_TABLE || "feedback_reports";
 const AUDIT_TABLE = process.env.AUDIT_TABLE || "audit_log";
 const USAGE_TABLE = process.env.USAGE_TABLE || "usage_daily";
 const SAVED_AREAS_TABLE = process.env.SAVED_AREAS_TABLE || "saved_areas";
+const COMMUNITY_POSTS_TABLE = process.env.COMMUNITY_POSTS_TABLE || "community_posts";
+const ACCOUNT_SETTINGS_TABLE = process.env.ACCOUNT_SETTINGS_TABLE || "account_settings";
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4.1-mini";
-const TACTICAL_SNAPSHOTS_TABLE = process.env.TACTICAL_SNAPSHOTS_TABLE || "tactical_snapshots";
 const AI_CHAT_SESSIONS_TABLE = process.env.AI_CHAT_SESSIONS_TABLE || "ai_chat_sessions";
 const AI_CHAT_MESSAGES_TABLE = process.env.AI_CHAT_MESSAGES_TABLE || "ai_chat_messages";
 const AI_MEMORY_TABLE = process.env.AI_MEMORY_TABLE || "ai_memory";
@@ -84,6 +83,19 @@ const STRIPE_PRICE_BASIC_YEARLY = process.env.STRIPE_PRICE_BASIC_YEARLY || "";
 const STRIPE_PRICE_PRO_MONTHLY = process.env.STRIPE_PRICE_PRO_MONTHLY || "";
 const STRIPE_PRICE_PRO_YEARLY = process.env.STRIPE_PRICE_PRO_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
+const FRONTEND_DIR = process.env.FRONTEND_DIR || path.resolve(process.cwd(), "../fishing-ai-frontend");
+const ALLOWED_ORIGINS = csvEnv(process.env.ALLOWED_ORIGINS || FRONTEND_URL || "");
+const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+const TRUST_PROXY = String(process.env.TRUST_PROXY || (IS_PRODUCTION ? "true" : "false")).toLowerCase() !== "false";
+const SECURITY_HEADERS_ENABLED = String(process.env.SECURITY_HEADERS || "true").toLowerCase() !== "false";
+const RATE_LIMITS_ENABLED = String(process.env.RATE_LIMITS || "true").toLowerCase() !== "false";
+const GEOCODE_SEARCH_URL = envValue("GEOCODE_SEARCH_URL") || "https://nominatim.openstreetmap.org/search";
+const GEOCODE_COUNTRYCODES = envValue("GEOCODE_COUNTRYCODES");
+const BODY_LIMIT_BYTES = Number(process.env.BODY_LIMIT_BYTES || 60 * 1024 * 1024);
+const NATIVE_APP_ORIGINS = csvEnv(
+  process.env.NATIVE_APP_ORIGINS || "capacitor://localhost,ionic://localhost,http://localhost,https://localhost"
+);
+const EFFECTIVE_ALLOWED_ORIGINS = Array.from(new Set([...ALLOWED_ORIGINS, ...NATIVE_APP_ORIGINS]));
 // During beta, admin can manually assign starter/basic/pro/founder without Stripe being active.
 const BETA_MANUAL_PLAN_ACCESS = String(process.env.BETA_MANUAL_PLAN_ACCESS || "true").toLowerCase() !== "false";
 
@@ -118,29 +130,115 @@ By using the beta, you agree not to misuse the service, interfere with the platf
 
 You keep ownership of the content you upload, and you give OceanCore AI permission to process and store it as needed to operate and improve the service.
 
+Community posts must avoid exposing another person's private information, exact fishing marks without permission, unsafe instructions, harassment, spam, or illegal activity.
+
+You may request export or deletion of your account data from Account & Settings where supported by the app.
+
 To the maximum extent permitted by law, OceanCore AI is not liable for indirect or consequential loss arising from beta use.
 
 Contact: ${LEGAL_CONTACT_EMAIL}`,
   privacy: `OceanCore AI Beta Privacy Policy
 
-We may collect account details, catch logs, notes, photos, AI prompts, AI responses, and location information you choose to provide.
+We may collect account details, profile details, catch logs, saved areas, boat details, notes, photos, videos, AI prompts, AI responses, feedback, device/browser diagnostics, and location information you choose to provide.
 
-We use this data to run the product, support sync, improve results, troubleshoot issues, and protect the service.
+We use this data to run the product, support account sync, personalize AI answers, display marine planning context, process uploads, troubleshoot issues, provide support, improve safety and moderation, and protect the service.
 
-We do not sell your personal information. We may use service providers to host data and provide infrastructure.
+We do not sell your personal information. We may use service providers such as hosting, database, storage, AI, payments, email, and diagnostics providers to operate OceanCore AI.
 
-Because this is a beta, product behavior and data flows may still change.
+Exact fishing marks and GPS coordinates are treated as private user content by default. Community sharing is designed around general-area reports unless you choose otherwise.
+
+You can export supported account data and request account deletion from Account & Settings. Some records may be retained where required for security, legal, billing, or abuse-prevention reasons.
+
+OceanCore AI is not intended for children under 13.
+
+Because this is a beta, product behavior and data flows may still change. We will update the legal version when material terms change.
 
 Contact: ${LEGAL_CONTACT_EMAIL}`,
+  data_rights: `OceanCore AI Account Deletion and Data Rights
+
+You can export supported account data from Account & Settings > Account, Data & Deletion by choosing Export My Data while signed in.
+
+You can delete your account from Account & Settings > Account, Data & Deletion by typing DELETE and choosing Delete Account.
+
+Account deletion removes your profile, account settings, catch logs, saved areas, feedback, AI chat history, AI memory, community likes, community reports, and the authentication account where supported by the backend.
+
+Community posts are marked deleted rather than kept public. Community comments may be hidden. This protects discussion integrity while removing your active identity from public surfaces.
+
+Some records may be retained where required for security, billing, legal compliance, fraud prevention, audit logs, backups, or abuse investigation.
+
+If you cannot access the app, contact ${LEGAL_CONTACT_EMAIL} from the email address on your OceanCore account and request account deletion or data export support.
+
+OceanCore AI is a beta product, so deletion/export coverage may expand as new features are added.`,
   disclaimer: `OceanCore AI Marine Disclaimer
 
 OceanCore AI is not a substitute for official forecasts, notices to mariners, navigation charts, local knowledge, or seamanship.
 
-Fishing advice, weather signals, swell signals, and tactical suggestions are estimates only.
+Fishing advice, weather signals, swell signals, and trip suggestions are estimates only.
 
 Always verify conditions, laws, and safety requirements independently before going on the water.`,
   beta_notice: `OceanCore AI is in beta. Use caution before relying on outputs in real-world marine conditions.`,
 };
+
+function escapeHtmlText(value: string) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function legalPageHtml(title: string, text: string, active: "terms" | "privacy" | "data" | "disclaimer") {
+  const nav = [
+    ["Terms", "/legal/terms-of-service", "terms"],
+    ["Privacy", "/legal/privacy-policy", "privacy"],
+    ["Data & Deletion", "/legal/account-deletion", "data"],
+    ["Marine Disclaimer", "/legal/marine-disclaimer", "disclaimer"],
+  ]
+    .map(([label, href, key]) => {
+      const selected = key === active ? ' aria-current="page"' : "";
+      return `<a${selected} href="${href}">${label}</a>`;
+    })
+    .join("");
+  const body = escapeHtmlText(text)
+    .split(/\n{2,}/)
+    .map((part) => `<p>${part.replace(/\n/g, "<br>")}</p>`)
+    .join("\n");
+  return `<!doctype html>
+<html lang="en-AU">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>${escapeHtmlText(title)} - OceanCore AI</title>
+  <meta name="description" content="OceanCore AI ${escapeHtmlText(title)}. Version ${LEGAL_VERSION}."/>
+  <meta name="theme-color" content="#040813"/>
+  <style>
+    :root{color-scheme:dark;--bg:#040813;--panel:#091225;--line:#20304c;--text:#edf6ff;--muted:#a9bddf;--cyan:#33efe7}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;background:radial-gradient(circle at top left,rgba(51,239,231,.16),transparent 30%),linear-gradient(180deg,#02050e,var(--bg) 48%,#000);color:var(--text);font:16px/1.65 Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;padding:28px}
+    main{width:min(860px,100%);margin:0 auto;border:1px solid var(--line);border-radius:24px;background:rgba(9,18,37,.92);box-shadow:0 24px 72px rgba(0,0,0,.42);overflow:hidden}
+    header{padding:28px;border-bottom:1px solid var(--line)} .brand{display:flex;gap:14px;align-items:center;margin-bottom:22px}.logo{width:48px;height:48px;border-radius:16px;background:conic-gradient(from 210deg,#49e7ff,#7dffd5,#4c6fff,#49e7ff);box-shadow:0 0 24px rgba(73,231,255,.42)}
+    h1{font-size:32px;line-height:1.15;margin:0 0 8px} .muted{color:var(--muted)} nav{display:flex;gap:10px;flex-wrap:wrap} nav a{color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 12px;font-weight:800} nav a[aria-current=page]{color:#04121a;background:linear-gradient(135deg,#7dffd5,#49e7ff);border-color:transparent}
+    section{padding:28px} p{margin:0 0 18px}.footer{border-top:1px solid var(--line);padding:18px 28px;color:var(--muted);font-size:14px} a{color:var(--cyan)}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand"><div class="logo" aria-hidden="true"></div><div><strong>OCEANCORE AI</strong><div class="muted">Fishing, boating, and marine planning assistant.</div></div></div>
+      <h1>${escapeHtmlText(title)}</h1>
+      <div class="muted">Version ${LEGAL_VERSION}. Contact <a href="mailto:${LEGAL_CONTACT_EMAIL}">${LEGAL_CONTACT_EMAIL}</a>.</div>
+      <nav aria-label="Legal documents">${nav}</nav>
+    </header>
+    <section>${body}</section>
+    <div class="footer">OceanCore AI is not a substitute for official forecasts, marine warnings, navigation charts, local knowledge, or safe seamanship.</div>
+  </main>
+</body>
+</html>`;
+}
+
+function sendLegalPage(reply: FastifyReply, title: string, text: string, active: "terms" | "privacy" | "data" | "disclaimer") {
+  return reply.type("text/html; charset=utf-8").send(legalPageHtml(title, text, active));
+}
 
 type AuthUser = {
   id: string;
@@ -192,6 +290,8 @@ type CatchRow = {
   is_legal?: boolean | null;
   lat?: number | null;
   lng?: number | null;
+  general_area?: string | null;
+  privacy?: string | null;
   notes?: string | null;
   photo_url?: string | null;
   created_at: string;
@@ -221,6 +321,64 @@ type SavedAreaRow = {
   notes?: string | null;
   privacy?: string | null;
   created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityPostRow = {
+  id: string;
+  user_id?: string | null;
+  user_email?: string | null;
+  author_name?: string | null;
+  title?: string | null;
+  species?: string | null;
+  general_area?: string | null;
+  caption?: string | null;
+  category?: string | null;
+  privacy?: string | null;
+  media_url?: string | null;
+  media_mime?: string | null;
+  media_type?: string | null;
+  allow_comments?: boolean | null;
+  comment_permission?: string | null;
+  hold_link_comments?: boolean | null;
+  blocked_words?: string | null;
+  upload_quality?: string | null;
+  status?: string | null;
+  likes_count?: number | null;
+  comments_count?: number | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityCommentRow = {
+  id: string;
+  post_id: string;
+  user_id?: string | null;
+  user_email?: string | null;
+  author_name?: string | null;
+  body: string;
+  status?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityReportRow = {
+  id: string;
+  post_id: string;
+  user_id?: string | null;
+  user_email?: string | null;
+  reason?: string | null;
+  notes?: string | null;
+  status?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type AccountSettingsRow = {
+  user_id: string;
+  user_email?: string | null;
+  settings: Record<string, any>;
+  created_at?: string | null;
   updated_at?: string | null;
 };
 
@@ -387,13 +545,123 @@ async function callSupabaseUpdateUser(accessToken: string, payload: Record<strin
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const DATA_DIR = path.join(process.cwd(), "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const COMMUNITY_POSTS_FILE = path.join(DATA_DIR, "community-posts.json");
+const COMMUNITY_COMMENTS_FILE = path.join(DATA_DIR, "community-comments.json");
+const COMMUNITY_REPORTS_FILE = path.join(DATA_DIR, "community-reports.json");
+const COMMUNITY_LIKES_FILE = path.join(DATA_DIR, "community-likes.json");
+const AVATAR_IMAGE_MAX_BYTES = Number(process.env.AVATAR_IMAGE_MAX_BYTES || 5 * 1024 * 1024);
+const CATCH_PHOTO_MAX_BYTES = Number(process.env.CATCH_PHOTO_MAX_BYTES || 12 * 1024 * 1024);
+const COMMUNITY_MEDIA_MAX_BYTES = Number(process.env.COMMUNITY_MEDIA_MAX_BYTES || 35 * 1024 * 1024);
+const IMAGE_UPLOAD_MIME_EXT = new Map([
+  ["image/jpeg", "jpg"],
+  ["image/jpg", "jpg"],
+  ["image/png", "png"],
+  ["image/webp", "webp"],
+  ["image/heic", "heic"],
+  ["image/heif", "heif"],
+]);
+const COMMUNITY_MEDIA_MIME_EXT = new Map([
+  ...IMAGE_UPLOAD_MIME_EXT,
+  ["video/mp4", "mp4"],
+  ["video/quicktime", "mov"],
+  ["video/webm", "webm"],
+]);
+const STRIP_IMAGE_UPLOAD_METADATA = process.env.STRIP_IMAGE_UPLOAD_METADATA !== "false";
+const METADATA_STRIPPED_IMAGE_MIME_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
 
 const app = Fastify({
   logger: false,
-  bodyLimit: 25 * 1024 * 1024,
+  bodyLimit: BODY_LIMIT_BYTES,
+  trustProxy: TRUST_PROXY,
 });
 
-app.register(cors, { origin: true, credentials: true });
+function isAllowedOrigin(origin: string | undefined) {
+  const value = normalizeOriginValue(origin || "");
+  if (!value) return true;
+  if (value === "null") return !IS_PRODUCTION;
+  if (EFFECTIVE_ALLOWED_ORIGINS.length) return EFFECTIVE_ALLOWED_ORIGINS.includes(value);
+  if (!IS_PRODUCTION) return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(value);
+  return false;
+}
+
+app.register(cors, {
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type", "Accept"],
+  exposedHeaders: ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+});
+
+app.addHook("onRequest", async (req, reply) => {
+  if (!SECURITY_HEADERS_ENABLED) return;
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("X-Frame-Options", "SAMEORIGIN");
+  reply.header("X-Permitted-Cross-Domain-Policies", "none");
+  reply.header("X-DNS-Prefetch-Control", "off");
+  reply.header("Origin-Agent-Cluster", "?1");
+  reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  reply.header("Permissions-Policy", "camera=(self), geolocation=(self), microphone=(self), payment=(self)");
+  if (IS_PRODUCTION) {
+    reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+});
+
+const RATE_POLICIES = {
+  auth: { bucket: "auth", limit: Number(process.env.RATE_LIMIT_AUTH || 20), windowMs: 15 * 60 * 1000 },
+  ai: { bucket: "ai", limit: Number(process.env.RATE_LIMIT_AI || 80), windowMs: 60 * 60 * 1000 },
+  media: { bucket: "media", limit: Number(process.env.RATE_LIMIT_MEDIA || 80), windowMs: 60 * 60 * 1000 },
+  feedback: { bucket: "feedback", limit: Number(process.env.RATE_LIMIT_FEEDBACK || 30), windowMs: 60 * 60 * 1000 },
+  write: { bucket: "write", limit: Number(process.env.RATE_LIMIT_WRITE || 300), windowMs: 60 * 60 * 1000 },
+} as const;
+const RATE_BUCKET_MAX = Number(process.env.RATE_BUCKET_MAX || 5000);
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function ratePolicy(req: any) {
+  const method = String(req.method || "GET").toUpperCase();
+  const url = String(req.url || "");
+  if (!RATE_LIMITS_ENABLED) return null;
+  if (method === "GET") return null;
+  if (/^\/auth\/(login|signup|reset-password|magic-link|update-password)/.test(url)) return RATE_POLICIES.auth;
+  if (/^\/(?:api\/)?ai\//.test(url)) return RATE_POLICIES.ai;
+  if (/^\/(?:api\/)?community/.test(url) || /^\/catches\/photo/.test(url) || /^\/catches\/with-photo/.test(url)) return RATE_POLICIES.media;
+  if (/^\/feedback/.test(url)) return RATE_POLICIES.feedback;
+  return RATE_POLICIES.write;
+}
+
+function clientRateKey(req: any, bucket: string) {
+  const forwarded = TRUST_PROXY ? String(req.headers?.["x-forwarded-for"] || "").split(",")[0].trim() : "";
+  return `${bucket}:${forwarded || req.ip || "unknown"}`;
+}
+
+app.addHook("preHandler", async (req, reply) => {
+  const policy = ratePolicy(req);
+  if (!policy) return;
+  const now = Date.now();
+  if (rateBuckets.size > RATE_BUCKET_MAX) {
+    for (const [key, bucket] of rateBuckets.entries()) if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+  const key = clientRateKey(req, policy.bucket);
+  const bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + policy.windowMs });
+    reply.header("X-RateLimit-Limit", String(policy.limit));
+    reply.header("X-RateLimit-Remaining", String(Math.max(0, policy.limit - 1)));
+    reply.header("X-RateLimit-Reset", String(Math.ceil((now + policy.windowMs) / 1000)));
+    return;
+  }
+  bucket.count += 1;
+  const remaining = Math.max(0, policy.limit - bucket.count);
+  reply.header("X-RateLimit-Limit", String(policy.limit));
+  reply.header("X-RateLimit-Remaining", String(remaining));
+  reply.header("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
+  if (bucket.count > policy.limit) {
+    const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    reply.header("Retry-After", String(retryAfter));
+    return reply.code(429).send({ success: false, error: "Too many requests. Slow down and try again shortly.", retry_after_seconds: retryAfter });
+  }
+});
 // Keep raw JSON body for Stripe webhook signature verification while still parsing normal JSON routes.
 app.removeContentTypeParser("application/json");
 app.addContentTypeParser("application/json", { parseAs: "string" }, (req: any, body: string, done) => {
@@ -405,6 +673,14 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (req: any, b
 
 app.register(multipart, { attachFieldsToBody: true });
 app.register(fastifyStatic, { root: UPLOAD_DIR, prefix: "/media/" });
+if (fs.existsSync(path.join(FRONTEND_DIR, "index.html"))) {
+  app.register(fastifyStatic, {
+    root: FRONTEND_DIR,
+    prefix: "/app/",
+    decorateReply: false,
+  });
+  app.get("/app", async (_req, reply) => reply.redirect("/app/"));
+}
 
 const mem = {
   profiles: new Map<string, ProfileRow>(),
@@ -417,6 +693,11 @@ const mem = {
   aiChatMessages: [] as any[],
   aiMemory: [] as any[],
   aiFeedback: [] as any[],
+  communityPosts: [] as CommunityPostRow[],
+  communityComments: [] as CommunityCommentRow[],
+  communityReports: [] as CommunityReportRow[],
+  communityLikes: [] as { post_id: string; user_id: string; user_email?: string | null; created_at: string }[],
+  accountSettings: new Map<string, AccountSettingsRow>(),
 };
 
 function ok<T>(reply: any, body: T) {
@@ -425,7 +706,8 @@ function ok<T>(reply: any, body: T) {
 
 function fail(reply: any, error: unknown, status = 500) {
   console.error(error);
-  reply.code(status).send({
+  const code = Number((error as any)?.statusCode || status || 500);
+  reply.code(Number.isFinite(code) ? clamp(code, 400, 599) : 500).send({
     success: false,
     error: error instanceof Error ? error.message : String(error),
   });
@@ -468,6 +750,11 @@ function bool(v: any): boolean | null {
   return null;
 }
 
+function normalizeLocationPrivacy(input: any, fallback = "private") {
+  const raw = str(input, fallback).toLowerCase();
+  return ["private", "general", "area_only", "public"].includes(raw) ? raw : fallback;
+}
+
 function cleanSpecies(v: any) {
   const value = str(v, "Unknown").replace(/\s+/g, " ").trim();
   if (!value) return "Unknown";
@@ -504,18 +791,24 @@ function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number) {
 }
 
 function isDataUrlImage(v: string) {
-  return /^data:image\/[a-z0-9.+-]+;base64,/i.test(String(v || "").trim());
+  const match = String(v || "").trim().match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  return !!(match && IMAGE_UPLOAD_MIME_EXT.has(match[1].toLowerCase()));
 }
 
 function makeAbsoluteMediaUrl(req: any, url: string | null | undefined) {
   const value = String(url || "").trim();
   if (!value) return null;
-  if (/^https?:\/\//i.test(value) || value.startsWith("data:image/")) return value;
+  if (/^https?:\/\//i.test(value) || value.startsWith("data:image/") || value.startsWith("data:video/")) return value;
   if (!value.startsWith("/media/")) return value;
   const proto =
     String(req?.headers?.["x-forwarded-proto"] || "").trim() || "http";
   const host = String(req?.headers?.host || "").trim() || `${HOST}:${PORT}`;
   return `${proto}://${host}${value}`;
+}
+
+function isDataUrlMedia(v: string) {
+  const match = String(v || "").trim().match(/^data:((?:image|video)\/[a-z0-9.+-]+);base64,/i);
+  return !!(match && COMMUNITY_MEDIA_MIME_EXT.has(match[1].toLowerCase()));
 }
 
 function getBearerToken(req: any): string {
@@ -759,6 +1052,141 @@ async function saveProfileForUser(user: AuthUser, patch: Partial<ProfileRow>) {
   return merged;
 }
 
+function isPlainObject(value: any): value is Record<string, any> {
+  return !!value && typeof value === "object" && !Array.isArray(value) && !Buffer.isBuffer(value);
+}
+
+function sanitizeJsonValue(value: any, depth = 0): any {
+  if (depth > 8) return null;
+  const raw = unwrapBodyValue(value);
+  if (raw == null) return null;
+  if (typeof raw === "string") return raw.slice(0, 1000);
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "boolean") return raw;
+  if (Array.isArray(raw)) return raw.slice(0, 50).map((item) => sanitizeJsonValue(item, depth + 1));
+  if (!isPlainObject(raw)) return null;
+  const out: Record<string, any> = {};
+  Object.entries(raw).slice(0, 200).forEach(([key, item]) => {
+    const cleanKey = String(key).replace(/[^\w.-]/g, "").slice(0, 80);
+    if (!cleanKey) return;
+    out[cleanKey] = sanitizeJsonValue(item, depth + 1);
+  });
+  return out;
+}
+
+function sanitizeAccountSettings(input: any): Record<string, any> {
+  const source = isPlainObject(input?.settings) ? input.settings : input;
+  const settings = sanitizeJsonValue(source);
+  if (!isPlainObject(settings)) throw new Error("Settings must be a JSON object.");
+  const size = Buffer.byteLength(JSON.stringify(settings), "utf8");
+  if (size > 64_000) throw new Error("Settings payload is too large.");
+  return settings;
+}
+
+function normalizeAccountSettings(row: any, user: AuthUser): AccountSettingsRow {
+  return {
+    user_id: String(row?.user_id || user.id),
+    user_email: row?.user_email ?? user.email ?? null,
+    settings: isPlainObject(row?.settings) ? row.settings : {},
+    created_at: row?.created_at ?? null,
+    updated_at: row?.updated_at ?? null,
+  };
+}
+
+function settingsTableUnavailable(error: any) {
+  const message = String(error?.message || error || "").toLowerCase();
+  const code = String(error?.code || "");
+  return code === "42P01" || code === "PGRST205" || /account_settings|schema cache|does not exist|not found/.test(message);
+}
+
+function catchPrivacyColumnsUnavailable(error: any) {
+  const message = String(error?.message || error || "").toLowerCase();
+  const code = String(error?.code || "");
+  return code === "42703" || code === "PGRST204" || /general_area|privacy|schema cache|column/.test(message);
+}
+
+async function getAccountSettingsForUser(user: AuthUser): Promise<AccountSettingsRow & { storage: string; warning?: string }> {
+  const fallback = () => {
+    const row = mem.accountSettings.get(user.id) || {
+      user_id: user.id,
+      user_email: user.email ?? null,
+      settings: {},
+      created_at: null,
+      updated_at: null,
+    };
+    return { ...normalizeAccountSettings(row, user), storage: "memory" };
+  };
+
+  if (!supabase || user.isGuest) return fallback();
+
+  const res = await supabase
+    .from(ACCOUNT_SETTINGS_TABLE)
+    .select("user_id,user_email,settings,created_at,updated_at")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (res.error) {
+    if (settingsTableUnavailable(res.error)) {
+      return { ...fallback(), warning: `Run the Supabase schema migration to enable cloud settings sync (${ACCOUNT_SETTINGS_TABLE}).` };
+    }
+    throw res.error;
+  }
+
+  return { ...normalizeAccountSettings(res.data || {}, user), storage: "supabase" };
+}
+
+async function saveAccountSettingsForUser(user: AuthUser, settingsInput: any): Promise<AccountSettingsRow & { storage: string; warning?: string }> {
+  const settings = sanitizeAccountSettings(settingsInput);
+  const now = new Date().toISOString();
+
+  if (!supabase || user.isGuest) {
+    const row = normalizeAccountSettings({
+      ...(mem.accountSettings.get(user.id) || {}),
+      user_id: user.id,
+      user_email: user.email ?? null,
+      settings,
+      updated_at: now,
+    }, user);
+    mem.accountSettings.set(user.id, row);
+    return { ...row, storage: "memory" };
+  }
+
+  const res = await supabase
+    .from(ACCOUNT_SETTINGS_TABLE)
+    .upsert(
+      {
+        user_id: user.id,
+        user_email: user.email ?? null,
+        settings,
+        updated_at: now,
+      },
+      { onConflict: "user_id" }
+    )
+    .select("user_id,user_email,settings,created_at,updated_at")
+    .single();
+
+  if (res.error) {
+    if (settingsTableUnavailable(res.error)) {
+      const row = normalizeAccountSettings({
+        user_id: user.id,
+        user_email: user.email ?? null,
+        settings,
+        updated_at: now,
+      }, user);
+      mem.accountSettings.set(user.id, row);
+      return { ...row, storage: "memory", warning: `Run the Supabase schema migration to enable cloud settings sync (${ACCOUNT_SETTINGS_TABLE}).` };
+    }
+    throw res.error;
+  }
+
+  return { ...normalizeAccountSettings(res.data, user), storage: "supabase" };
+}
+
+const CATCH_SELECT =
+  "id,user_id,user_email,species,weight_kg,length_cm,legal_limit_cm,is_legal,lat,lng,general_area,privacy,notes,photo_url,created_at";
+const CATCH_SELECT_LEGACY =
+  "id,user_id,user_email,species,weight_kg,length_cm,legal_limit_cm,is_legal,lat,lng,notes,photo_url,created_at";
+
 async function listUserCatches(user: AuthUser, limit = 100): Promise<CatchRow[]> {
   if (!supabase) {
     return mem.catches
@@ -769,12 +1197,25 @@ async function listUserCatches(user: AuthUser, limit = 100): Promise<CatchRow[]>
 
   const res = await supabase
     .from(CATCHES_TABLE)
-    .select(
-      "id,user_id,user_email,species,weight_kg,length_cm,legal_limit_cm,is_legal,lat,lng,notes,photo_url,created_at"
-    )
+    .select(CATCH_SELECT)
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(limit);
+
+  if (res.error && catchPrivacyColumnsUnavailable(res.error)) {
+    const legacy = await supabase
+      .from(CATCHES_TABLE)
+      .select(CATCH_SELECT_LEGACY)
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (legacy.error) throw legacy.error;
+    return (legacy.data || []).map((row: any) => ({
+      ...row,
+      general_area: null,
+      privacy: "private",
+    })) as CatchRow[];
+  }
 
   if (res.error) throw res.error;
   return (res.data || []) as CatchRow[];
@@ -795,6 +1236,8 @@ async function insertCatch(user: AuthUser, payload: Partial<CatchRow>): Promise<
         : payload.is_legal ?? null,
     lat: payload.lat ?? null,
     lng: payload.lng ?? null,
+    general_area: str(payload.general_area, "").slice(0, 160) || null,
+    privacy: normalizeLocationPrivacy(payload.privacy, "private"),
     notes: str(payload.notes, "") || null,
     photo_url: payload.photo_url ?? null,
     created_at: new Date().toISOString(),
@@ -817,13 +1260,39 @@ async function insertCatch(user: AuthUser, payload: Partial<CatchRow>): Promise<
       is_legal: row.is_legal,
       lat: row.lat,
       lng: row.lng,
+      general_area: row.general_area,
+      privacy: row.privacy,
       notes: row.notes,
       photo_url: row.photo_url,
     })
-    .select(
-      "id,user_id,user_email,species,weight_kg,length_cm,legal_limit_cm,is_legal,lat,lng,notes,photo_url,created_at"
-    )
+    .select(CATCH_SELECT)
     .single();
+
+  if (saved.error && catchPrivacyColumnsUnavailable(saved.error)) {
+    const legacy = await supabase
+      .from(CATCHES_TABLE)
+      .insert({
+        user_id: row.user_id,
+        user_email: row.user_email,
+        species: row.species,
+        weight_kg: row.weight_kg,
+        length_cm: row.length_cm,
+        legal_limit_cm: row.legal_limit_cm,
+        is_legal: row.is_legal,
+        lat: row.lat,
+        lng: row.lng,
+        notes: row.notes,
+        photo_url: row.photo_url,
+      })
+      .select(CATCH_SELECT_LEGACY)
+      .single();
+    if (legacy.error) throw legacy.error;
+    return {
+      ...(legacy.data as any),
+      general_area: row.general_area,
+      privacy: row.privacy,
+    } as CatchRow;
+  }
 
   if (saved.error) throw saved.error;
   return saved.data as CatchRow;
@@ -885,25 +1354,229 @@ function summarizeCatchStats(rows: CatchRow[]) {
   };
 }
 
-async function saveDataUrlImage(dataUrl: string): Promise<string> {
-  const match = dataUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
-  if (!match) throw new Error("Invalid image data URL");
+function uploadError(message: string, statusCode = 400) {
+  const err = new Error(message) as Error & { statusCode?: number };
+  err.statusCode = statusCode;
+  return err;
+}
+
+function mb(bytes: number) {
+  return Math.round(bytes / 1024 / 1024);
+}
+
+function estimateBase64Bytes(base64: string) {
+  const clean = base64.replace(/\s/g, "");
+  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
+}
+
+function validateUploadSignature(mime: string, buffer: Buffer) {
+  if (buffer.length < 8) return false;
+  const ascii4 = (start: number, end: number) => buffer.subarray(start, end).toString("ascii");
+  if ((mime === "image/jpeg" || mime === "image/jpg") && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return true;
+  if (mime === "image/png" && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return true;
+  if (mime === "image/webp" && ascii4(0, 4) === "RIFF" && ascii4(8, 12) === "WEBP") return true;
+  const hasFtyp = buffer.length >= 12 && ascii4(4, 8) === "ftyp";
+  if ((mime === "image/heic" || mime === "image/heif") && hasFtyp) {
+    return /heic|heix|hevc|hevx|mif1|msf1/i.test(ascii4(8, Math.min(buffer.length, 40)));
+  }
+  if ((mime === "video/mp4" || mime === "video/quicktime") && hasFtyp) return true;
+  if (mime === "video/webm" && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) return true;
+  return false;
+}
+
+function stripJpegMetadata(buffer: Buffer) {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return buffer;
+
+  const parts: Buffer[] = [buffer.subarray(0, 2)];
+  let pos = 2;
+  const shouldDropMarker = (marker: number) => marker === 0xe1 || marker === 0xed || marker === 0xfe;
+
+  while (pos < buffer.length) {
+    if (buffer[pos] !== 0xff) {
+      parts.push(buffer.subarray(pos));
+      break;
+    }
+
+    const markerStart = pos;
+    while (pos < buffer.length && buffer[pos] === 0xff) pos += 1;
+    if (pos >= buffer.length) {
+      parts.push(buffer.subarray(markerStart));
+      break;
+    }
+
+    const marker = buffer[pos];
+    pos += 1;
+
+    if (marker === 0xda || marker === 0xd9) {
+      parts.push(buffer.subarray(markerStart));
+      break;
+    }
+
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      parts.push(buffer.subarray(markerStart, pos));
+      continue;
+    }
+
+    if (pos + 2 > buffer.length) return buffer;
+    const segmentLength = buffer.readUInt16BE(pos);
+    if (segmentLength < 2) return buffer;
+    const segmentEnd = pos + segmentLength;
+    if (segmentEnd > buffer.length) return buffer;
+
+    if (!shouldDropMarker(marker)) {
+      parts.push(buffer.subarray(markerStart, segmentEnd));
+    }
+    pos = segmentEnd;
+  }
+
+  const stripped = Buffer.concat(parts);
+  return stripped.length > 2 ? stripped : buffer;
+}
+
+function stripPngMetadata(buffer: Buffer) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (buffer.length < 20 || !buffer.subarray(0, 8).equals(signature)) return buffer;
+
+  const metadataChunks = new Set(["eXIf", "tEXt", "zTXt", "iTXt", "tIME"]);
+  const parts: Buffer[] = [buffer.subarray(0, 8)];
+  let pos = 8;
+  let sawEnd = false;
+
+  while (pos + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(pos);
+    const type = buffer.subarray(pos + 4, pos + 8).toString("ascii");
+    const chunkEnd = pos + 12 + length;
+    if (chunkEnd > buffer.length) return buffer;
+
+    if (!metadataChunks.has(type)) {
+      parts.push(buffer.subarray(pos, chunkEnd));
+    }
+
+    pos = chunkEnd;
+    if (type === "IEND") {
+      sawEnd = true;
+      break;
+    }
+  }
+
+  return sawEnd ? Buffer.concat(parts) : buffer;
+}
+
+function stripWebpMetadata(buffer: Buffer) {
+  if (
+    buffer.length < 12 ||
+    buffer.subarray(0, 4).toString("ascii") !== "RIFF" ||
+    buffer.subarray(8, 12).toString("ascii") !== "WEBP"
+  ) {
+    return buffer;
+  }
+
+  const metadataChunks = new Set(["EXIF", "XMP "]);
+  const parts: Buffer[] = [];
+  let pos = 12;
+
+  while (pos + 8 <= buffer.length) {
+    const type = buffer.subarray(pos, pos + 4).toString("ascii");
+    const length = buffer.readUInt32LE(pos + 4);
+    const dataEnd = pos + 8 + length;
+    const paddedEnd = dataEnd + (length % 2);
+    if (paddedEnd > buffer.length) return buffer;
+
+    if (!metadataChunks.has(type)) {
+      parts.push(buffer.subarray(pos, paddedEnd));
+    }
+
+    pos = paddedEnd;
+  }
+
+  if (pos !== buffer.length) return buffer;
+  const body = Buffer.concat(parts);
+  const header = Buffer.alloc(12);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(body.length + 4, 4);
+  header.write("WEBP", 8, "ascii");
+  return Buffer.concat([header, body]);
+}
+
+function stripImageUploadMetadata(mime: string, buffer: Buffer) {
+  if (!STRIP_IMAGE_UPLOAD_METADATA) return buffer;
+
+  try {
+    if (mime === "image/jpeg" || mime === "image/jpg") return stripJpegMetadata(buffer);
+    if (mime === "image/png") return stripPngMetadata(buffer);
+    if (mime === "image/webp") return stripWebpMetadata(buffer);
+  } catch (e) {
+    console.warn("image metadata stripping failed; storing original upload", e);
+  }
+
+  return buffer;
+}
+
+function parseDataUrlUpload(
+  dataUrl: string,
+  allowed: Map<string, string>,
+  maxBytes: number,
+  label: string
+) {
+  const match = String(dataUrl || "").trim().match(/^data:((?:image|video)\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
+  if (!match) throw uploadError(`Invalid ${label} data URL.`);
 
   const mime = match[1].toLowerCase();
-  const base64 = match[2];
-  const ext =
-    mime === "image/png"
-      ? "png"
-      : mime === "image/webp"
-      ? "webp"
-      : mime === "image/gif"
-      ? "gif"
-      : "jpg";
+  const ext = allowed.get(mime);
+  if (!ext) {
+    throw uploadError(`${label} must be one of: ${[...allowed.keys()].join(", ")}.`);
+  }
 
-  const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+  const base64 = match[2].replace(/\s/g, "");
+  if (!/^[a-z0-9+/]+={0,2}$/i.test(base64)) throw uploadError(`Invalid ${label} base64 data.`);
+  if (estimateBase64Bytes(base64) > maxBytes) {
+    throw uploadError(`${label} is too large. Try under ${mb(maxBytes)}MB.`, 413);
+  }
+
+  const buffer = Buffer.from(base64, "base64");
+  if (!buffer.length) throw uploadError(`${label} is empty.`);
+  if (buffer.length > maxBytes) throw uploadError(`${label} is too large. Try under ${mb(maxBytes)}MB.`, 413);
+  if (!validateUploadSignature(mime, buffer)) {
+    throw uploadError(`${label} does not match its declared file type.`);
+  }
+
+  return { mime, ext, buffer };
+}
+
+async function saveDataUrlImage(
+  dataUrl: string,
+  options: { maxBytes?: number; prefix?: string; label?: string } = {}
+): Promise<string> {
+  const parsed = parseDataUrlUpload(
+    dataUrl,
+    IMAGE_UPLOAD_MIME_EXT,
+    options.maxBytes || CATCH_PHOTO_MAX_BYTES,
+    options.label || "Image"
+  );
+  const storageBuffer = stripImageUploadMetadata(parsed.mime, parsed.buffer);
+  const filename = `${options.prefix || ""}${Date.now()}-${crypto.randomUUID()}.${parsed.ext}`;
   const filepath = path.join(UPLOAD_DIR, filename);
-  await fs.promises.writeFile(filepath, Buffer.from(base64, "base64"));
+  await fs.promises.writeFile(filepath, storageBuffer);
   return `/media/${filename}`;
+}
+
+async function saveDataUrlMedia(dataUrl: string): Promise<{ url: string; mime: string; type: string }> {
+  const parsed = parseDataUrlUpload(
+    dataUrl,
+    COMMUNITY_MEDIA_MIME_EXT,
+    COMMUNITY_MEDIA_MAX_BYTES,
+    "Community media"
+  );
+  const storageBuffer = stripImageUploadMetadata(parsed.mime, parsed.buffer);
+  const filename = `community-${Date.now()}-${crypto.randomUUID()}.${parsed.ext}`;
+  const filepath = path.join(UPLOAD_DIR, filename);
+  await fs.promises.writeFile(filepath, storageBuffer);
+  return {
+    url: `/media/${filename}`,
+    mime: parsed.mime,
+    type: parsed.mime.startsWith("video/") ? "video" : "image",
+  };
 }
 
 function normalizeAddress(tags: Record<string, any> = {}) {
@@ -1069,6 +1742,65 @@ out center tags;`;
   }
 
   return output;
+}
+
+async function searchGeocode(query: string, limit = 5) {
+  const q = str(query).replace(/\s+/g, " ").slice(0, 160);
+  if (q.length < 2) throw new Error("Search text is too short.");
+
+  const url = new URL(GEOCODE_SEARCH_URL);
+  url.searchParams.set("q", q);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("addressdetails", "1");
+  const safeLimit = Number.isFinite(Number(limit)) ? clamp(Math.round(Number(limit)), 1, 8) : 5;
+  url.searchParams.set("limit", String(safeLimit));
+  if (GEOCODE_COUNTRYCODES) url.searchParams.set("countrycodes", GEOCODE_COUNTRYCODES);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "OceanCoreAI/1.0 support@oceancore.ai",
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Location search failed (${res.status})`);
+
+    const rows = (await res.json()) as any[];
+    return (Array.isArray(rows) ? rows : [])
+      .map((row, index) => {
+        const lat = Number(row.lat);
+        const lng = Number(row.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        const address = row.address || {};
+        const name =
+          str(row.name) ||
+          str(address.suburb) ||
+          str(address.city) ||
+          str(address.town) ||
+          str(address.village) ||
+          str(row.display_name, "Location");
+        return {
+          id: str(row.place_id, `geocode-${index}`),
+          name,
+          label: str(row.display_name, name),
+          lat,
+          lng,
+          type: str(row.type || row.class, "place"),
+          importance: Number.isFinite(Number(row.importance)) ? Number(row.importance) : null,
+          source: "geocode",
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    if ((error as any)?.name === "AbortError") throw new Error("Location search timed out.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function signalFromConditions(windKts: number | null, gustKts: number | null, waveM: number | null) {
@@ -1285,633 +2017,6 @@ async function getMarineForecast(lat: number, lng: number) {
   }
 }
 
-
-// ============================================================
-// OceanCore Satellite Intel V1 — real raster overlay support + species scan
-// ============================================================
-type SatelliteSignal = "green" | "amber" | "red";
-
-type SatelliteCell = {
-  id: string;
-  lat: number;
-  lng: number;
-  score: number;
-  signal: SatelliteSignal;
-  // Absolute score is 0-100. Relative rank makes the scan useful like Rip-style charts:
-  // the strongest cells in THIS area become hot zones even if the day is only average.
-  relative_rank?: number;
-  relative_percentile?: number;
-  signal_basis?: string;
-  normalized_heat?: number;
-  heat_alpha?: number;
-  target_species: string;
-  target_species_label: string;
-  reasons: string[];
-  ocean: OceanSnapshot;
-  components: {
-    weather: number;
-    species: number;
-    sst: number | null;
-    chlorophyll: number | null;
-    current: number | null;
-    depth: number | null;
-    data_quality: number;
-    front?: number;
-    shelf?: number;
-    eddy?: number;
-  };
-};
-
-type OceanScalarSource = {
-  value: number | null;
-  unit: string | null;
-  source: string;
-  status: "live" | "configured_missing" | "unconfigured" | "error";
-  error?: string | null;
-  raw_value?: number | null;
-};
-
-type OceanSnapshot = {
-  success: boolean;
-  location: { lat: number; lng: number };
-  generated_at: string;
-  marine: any;
-  sst_c: number | null;
-  chlorophyll_mg_m3: number | null;
-  current_speed_kts: number | null;
-  current_direction_deg: number | null;
-  depth_m: number | null;
-  sources: {
-    weather: string;
-    sst: OceanScalarSource;
-    chlorophyll: OceanScalarSource;
-    currents: OceanScalarSource;
-    depth: OceanScalarSource;
-  };
-};
-
-const SATELLITE_TARGETS: Record<string, { label: string; group: string; profile: string; prefers: string[] }> = {
-  black_marlin: { label: "Black Marlin", group: "Billfish", profile: "warm_bluewater_edge", prefers: ["warm water", "current edges", "bait schools", "offshore structure"] },
-  blue_marlin: { label: "Blue Marlin", group: "Billfish", profile: "warm_bluewater_edge", prefers: ["warm water", "bluewater edges", "current lines", "bait"] },
-  striped_marlin: { label: "Striped Marlin", group: "Billfish", profile: "temperate_edge", prefers: ["temperature breaks", "bait edges", "shelf lines"] },
-  sailfish: { label: "Sailfish", group: "Billfish", profile: "warm_inshore_bluewater", prefers: ["warm water", "bait schools", "current lines"] },
-  spearfish: { label: "Spearfish", group: "Billfish", profile: "temperate_edge", prefers: ["thermal breaks", "deep edges", "bait"] },
-
-  southern_bluefin_tuna: { label: "Southern Bluefin Tuna", group: "Tuna", profile: "cool_temp_break", prefers: ["cooler productive water", "hard thermal fronts", "bait edges", "shelf structure"] },
-  yellowfin_tuna: { label: "Yellowfin Tuna", group: "Tuna", profile: "warm_edge", prefers: ["warm edges", "current lines", "chlorophyll edges", "bait"] },
-  longtail_tuna: { label: "Longtail Tuna", group: "Tuna", profile: "coastal_bait_edge", prefers: ["coastal bait", "clean-green edges", "wind lines"] },
-  bigeye_tuna: { label: "Bigeye Tuna", group: "Tuna", profile: "deep_edge", prefers: ["deep edges", "temperature breaks", "night/day vertical movement"] },
-  albacore: { label: "Albacore", group: "Tuna", profile: "cool_temp_break", prefers: ["cooler water", "fronts", "bait edges"] },
-  skipjack_tuna: { label: "Skipjack Tuna", group: "Tuna", profile: "bait_productivity", prefers: ["bait schools", "chlorophyll edges", "surface activity"] },
-  dogtooth_tuna: { label: "Dogtooth Tuna", group: "Tuna", profile: "reef_dropoff", prefers: ["reef drop-offs", "current", "deep structure"] },
-
-  spanish_mackerel: { label: "Spanish Mackerel", group: "Mackerel / Wahoo", profile: "coastal_bait_edge", prefers: ["bait schools", "clean water", "reef/current edges"] },
-  spotted_mackerel: { label: "Spotted Mackerel", group: "Mackerel / Wahoo", profile: "coastal_bait_edge", prefers: ["coastal bait", "surface activity", "moderate clean water"] },
-  school_mackerel: { label: "School Mackerel", group: "Mackerel / Wahoo", profile: "coastal_bait_edge", prefers: ["coastal bait", "inshore edges", "surface schools"] },
-  wahoo: { label: "Wahoo", group: "Mackerel / Wahoo", profile: "fast_current_edge", prefers: ["strong current edges", "bluewater", "FAD/structure edges"] },
-
-  mahi_mahi: { label: "Mahi Mahi / Dolphinfish", group: "Other Pelagics", profile: "warm_floating_structure", prefers: ["warm water", "current seams", "floating structure", "FADs"] },
-  cobia: { label: "Cobia", group: "Other Pelagics", profile: "structure_current", prefers: ["structure", "current lines", "rays/sharks/bait"] },
-  queenfish: { label: "Queenfish", group: "Other Pelagics", profile: "coastal_bait_edge", prefers: ["coastal bait", "current lines", "warm water"] },
-  giant_trevally: { label: "Giant Trevally", group: "Other Pelagics", profile: "reef_current", prefers: ["reef current", "pressure edges", "bait"] },
-  amberjack: { label: "Amberjack", group: "Other Pelagics", profile: "deep_structure", prefers: ["deep structure", "current", "bait"] },
-  samson_fish: { label: "Samson Fish", group: "Other Pelagics", profile: "deep_structure", prefers: ["deep structure", "cooler edges", "bait"] },
-  kingfish: { label: "Kingfish", group: "Other Pelagics", profile: "structure_current", prefers: ["structure", "current", "bait schools"] },
-};
-
-function normalizeTargetSpecies(raw: any) {
-  const key = str(raw, "black_marlin").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  return SATELLITE_TARGETS[key] ? key : "black_marlin";
-}
-
-function weatherScoreForSatellite(marine: any) {
-  const current = marine?.current || {};
-  const wind = Number(current.wind_kts ?? 0);
-  const gust = Number(current.gust_kts ?? 0);
-  const wave = Number(current.wave_m ?? 0);
-  const swell = Number(current.swell_m ?? 0);
-
-  let score = 70;
-  const reasons: string[] = [];
-
-  if (wind && wind <= 12) { score += 12; reasons.push("Wind looks fishable"); }
-  else if (wind && wind <= 18) { score += 2; reasons.push("Moderate wind"); }
-  else if (wind) { score -= 18; reasons.push("Strong wind risk"); }
-
-  if (gust && gust > 26) { score -= 14; reasons.push("High gust risk"); }
-  else if (gust && gust <= 20) { score += 5; reasons.push("Gusts controlled"); }
-
-  if (wave && wave <= 0.8) { score += 8; reasons.push("Wave height manageable"); }
-  else if (wave && wave <= 1.5) { score -= 2; reasons.push("Some sea state"); }
-  else if (wave) { score -= 18; reasons.push("Rough wave height"); }
-
-  if (swell && swell > 1.7) { score -= 14; reasons.push("High swell risk"); }
-  else if (swell && swell <= 1.0) { score += 4; reasons.push("Swell reasonable"); }
-
-  return { score: clamp(Math.round(score), 0, 100), reasons };
-}
-
-function speciesProfileScore(speciesKey: string, lat: number, lng: number) {
-  const target = SATELLITE_TARGETS[speciesKey] || SATELLITE_TARGETS.black_marlin;
-  // Deterministic small variation by cell so the V1 raster/score overlay shows usable zones
-  // before SST/chlorophyll numeric ingestion is plugged in.
-  const wave = Math.sin((lat * 12.9898 + lng * 78.233) * 0.35);
-  const edge = Math.cos((lat * 4.23 - lng * 9.17) * 0.55);
-  let score = 55 + Math.round(wave * 12 + edge * 10);
-  const reasons: string[] = [];
-
-  if (target.profile.includes("warm")) { score += 7; reasons.push("Target favours warm bluewater edges"); }
-  if (target.profile.includes("cool")) { score += 4; reasons.push("Target favours cooler productive breaks"); }
-  if (target.profile.includes("current") || target.profile.includes("edge")) { score += 6; reasons.push("Edge/current profile selected"); }
-  if (target.profile.includes("structure") || target.profile.includes("reef")) { score += 3; reasons.push("Structure/current behaviour included"); }
-
-  return { score: clamp(score, 0, 100), reasons };
-}
-
-function signalFromScore(score: number): SatelliteSignal {
-  if (score >= 72) return "green";
-  if (score >= 45) return "amber";
-  return "red";
-}
-
-
-function oceanDataEmptySource(source: string, status: OceanScalarSource["status"], error?: string | null): OceanScalarSource {
-  return { value: null, unit: null, source, status, error: error || null };
-}
-
-async function fetchJsonWithTimeout(url: string, timeoutMs = OCEAN_DATA_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "OceanCoreAI/1.0 (+https://oceancore.ai)" },
-      signal: controller.signal,
-    });
-    const text = await res.text();
-    let json: any = null;
-    try { json = text ? JSON.parse(text) : null; }
-    catch { json = { error: text || `Request failed (${res.status})` }; }
-    if (!res.ok) throw new Error(json?.error || json?.message || `Request failed (${res.status})`);
-    return json;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function erddapPointUrl(base: string, variable: string, lat: number, lng: number) {
-  const cleanBase = String(base || "").replace(/\/$/, "");
-  const q = `${variable}[(last)][(${lat})][(${lng})]`;
-  return `${cleanBase}.json?${encodeURIComponent(q)}`;
-}
-
-function readErddapFirstNumber(json: any): number | null {
-  const rows = json?.table?.rows;
-  if (!Array.isArray(rows) || !rows.length) return null;
-  const row = rows[0];
-  if (!Array.isArray(row) || !row.length) return null;
-  for (let i = row.length - 1; i >= 0; i--) {
-    const n = Number(row[i]);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
-}
-
-async function fetchMURSstC(lat: number, lng: number): Promise<OceanScalarSource> {
-  if (!NOAA_MUR_SST_ERDDAP_BASE) return oceanDataEmptySource("NOAA CoastWatch ERDDAP MUR SST", "unconfigured");
-  try {
-    const json = await fetchJsonWithTimeout(erddapPointUrl(NOAA_MUR_SST_ERDDAP_BASE, NOAA_MUR_SST_VARIABLE, lat, lng));
-    const raw = readErddapFirstNumber(json);
-    if (raw == null) return oceanDataEmptySource("NOAA CoastWatch ERDDAP MUR SST", "configured_missing", "No SST value returned for this point/date.");
-    const c = raw > 100 ? raw - 273.15 : raw;
-    return { value: round2(c), unit: "°C", source: "NOAA CoastWatch ERDDAP MUR SST", status: "live", raw_value: raw };
-  } catch (e) {
-    return oceanDataEmptySource("NOAA CoastWatch ERDDAP MUR SST", "error", e instanceof Error ? e.message : String(e));
-  }
-}
-
-async function fetchChlorophyllMgM3(lat: number, lng: number): Promise<OceanScalarSource> {
-  if (!NOAA_CHL_ERDDAP_BASE) return oceanDataEmptySource("NOAA/NASA OceanColor ERDDAP chlorophyll", "unconfigured", "Set NOAA_CHL_ERDDAP_BASE to a griddap dataset base URL when you choose the chlorophyll provider.");
-  try {
-    const json = await fetchJsonWithTimeout(erddapPointUrl(NOAA_CHL_ERDDAP_BASE, NOAA_CHL_VARIABLE, lat, lng));
-    const raw = readErddapFirstNumber(json);
-    if (raw == null) return oceanDataEmptySource("NOAA/NASA OceanColor ERDDAP chlorophyll", "configured_missing", "No chlorophyll value returned for this point/date.");
-    return { value: round2(raw), unit: "mg/m³", source: "NOAA/NASA OceanColor ERDDAP chlorophyll", status: "live", raw_value: raw };
-  } catch (e) {
-    return oceanDataEmptySource("NOAA/NASA OceanColor ERDDAP chlorophyll", "error", e instanceof Error ? e.message : String(e));
-  }
-}
-
-async function fetchConfiguredOceanScalar(endpoint: string, lat: number, lng: number, source: string, unit: string): Promise<OceanScalarSource> {
-  if (!endpoint) return oceanDataEmptySource(source, "unconfigured");
-  try {
-    const sep = endpoint.includes("?") ? "&" : "?";
-    const json = await fetchJsonWithTimeout(`${endpoint}${sep}lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`);
-    const value = Number(json?.value ?? json?.speed_kts ?? json?.depth_m ?? json?.current_speed_kts ?? json?.data?.value);
-    if (!Number.isFinite(value)) return oceanDataEmptySource(source, "configured_missing", "Provider response did not include a numeric value.");
-    return { value: round2(value), unit, source, status: "live", raw_value: value };
-  } catch (e) {
-    return oceanDataEmptySource(source, "error", e instanceof Error ? e.message : String(e));
-  }
-}
-
-async function getOceanSnapshot(lat: number, lng: number): Promise<OceanSnapshot> {
-  const [marine, sst, chlorophyll, currents, depth] = await Promise.all([
-    getMarineForecast(lat, lng).catch((e) => ({ success: false, warning: e instanceof Error ? e.message : String(e), current: null, hours: [] })),
-    fetchMURSstC(lat, lng),
-    fetchChlorophyllMgM3(lat, lng),
-    fetchConfiguredOceanScalar(COPERNICUS_CURRENT_ENDPOINT, lat, lng, "Copernicus/current provider endpoint", "kt"),
-    fetchConfiguredOceanScalar(GEBCO_DEPTH_ENDPOINT, lat, lng, "GEBCO/depth provider endpoint", "m"),
-  ]);
-
-  return {
-    success: true,
-    location: { lat, lng },
-    generated_at: new Date().toISOString(),
-    marine,
-    sst_c: sst.value,
-    chlorophyll_mg_m3: chlorophyll.value,
-    current_speed_kts: currents.value,
-    current_direction_deg: null,
-    depth_m: depth.value,
-    sources: {
-      weather: marine?.source_name || "Windy Point Forecast API",
-      sst,
-      chlorophyll,
-      currents,
-      depth,
-    },
-  };
-}
-
-function scoreRange(value: number | null, min: number, idealMin: number, idealMax: number, max: number) {
-  if (value == null || !Number.isFinite(value)) return null;
-  if (value >= idealMin && value <= idealMax) return 18;
-  if (value < min || value > max) return 2;
-  if (value < idealMin) return clamp(Math.round(((value - min) / Math.max(0.001, idealMin - min)) * 16) + 2, 2, 18);
-  return clamp(Math.round(((max - value) / Math.max(0.001, max - idealMax)) * 16) + 2, 2, 18);
-}
-
-function sstScoreForTarget(speciesKey: string, target: { profile: string }, sstC: number | null) {
-  if (sstC == null) return null;
-  if (target.profile.includes("cool") || speciesKey.includes("bluefin") || speciesKey.includes("albacore")) {
-    return scoreRange(sstC, 10, 15, 21, 26);
-  }
-  if (target.profile.includes("temperate")) return scoreRange(sstC, 14, 18, 24, 29);
-  if (target.profile.includes("coastal")) return scoreRange(sstC, 18, 22, 29, 32);
-  return scoreRange(sstC, 18, 24, 30, 33);
-}
-
-function chlorophyllScoreForTarget(target: { profile: string }, chl: number | null) {
-  if (chl == null) return null;
-  if (target.profile.includes("bait") || target.profile.includes("coastal")) return scoreRange(chl, 0.03, 0.18, 1.1, 3.0);
-  return scoreRange(chl, 0.02, 0.06, 0.45, 1.8);
-}
-
-function dataQualityScore(snapshot: OceanSnapshot) {
-  const liveCount = [snapshot.sources.sst, snapshot.sources.chlorophyll, snapshot.sources.currents, snapshot.sources.depth]
-    .filter((s) => s.status === "live").length;
-  const weatherLive = snapshot.marine?.source_status === "windy_live" ? 1 : 0;
-  return clamp((liveCount * 4) + (weatherLive * 4), 0, 20);
-}
-
-function oceanSnapshotReasons(snapshot: OceanSnapshot, sstScore: number | null, chlScore: number | null) {
-  const current = snapshot.marine?.current || {};
-  const reasons: string[] = [];
-  if (current?.wind_kts != null) reasons.push(`Windy live: ${current.wind_kts} kt wind, ${current.wave_m ?? "—"} m wave`);
-  if (snapshot.sst_c != null) reasons.push(`Live SST: ${snapshot.sst_c}°C (${snapshot.sources.sst.source})`);
-  else reasons.push(`SST numeric: ${snapshot.sources.sst.status}`);
-  if (snapshot.chlorophyll_mg_m3 != null) reasons.push(`Live chlorophyll: ${snapshot.chlorophyll_mg_m3} mg/m³`);
-  else if (snapshot.sources.chlorophyll.status !== "unconfigured") reasons.push(`Chlorophyll numeric: ${snapshot.sources.chlorophyll.status}`);
-  if (snapshot.current_speed_kts != null) reasons.push(`Live current: ${snapshot.current_speed_kts} kt`);
-  if (snapshot.depth_m != null) reasons.push(`Live depth: ${snapshot.depth_m} m`);
-  if (sstScore != null) reasons.push(`SST suitability ${sstScore}/18`);
-  if (chlScore != null) reasons.push(`Chlorophyll suitability ${chlScore}/18`);
-  return reasons;
-}
-
-async function buildSatelliteIntelGrid(input: { lat: number; lng: number; radiusKm: number; speciesKey: string; layer: string; }) {
-  const target = SATELLITE_TARGETS[input.speciesKey] || SATELLITE_TARGETS.black_marlin;
-
-  // V25 Rip-style heat layer:
-  // Pull live ocean data at anchor points, then build a dense continuous raster grid.
-  // This avoids hammering Windy/NOAA with 1000+ requests while still producing a smooth heat surface.
-  const latRadiusDeg = input.radiusKm / 111;
-  const lngRadiusDeg = input.radiusKm / Math.max(25, 111 * Math.cos((Math.abs(input.lat) * Math.PI) / 180));
-  const minLat = input.lat - latRadiusDeg;
-  const maxLat = input.lat + latRadiusDeg;
-  const minLng = input.lng - lngRadiusDeg;
-  const maxLng = input.lng + lngRadiusDeg;
-
-  const rows = input.radiusKm >= 150 ? 55 : input.radiusKm >= 90 ? 49 : input.radiusKm >= 55 ? 43 : 39;
-  const cols = rows;
-
-  const anchorSteps = [0, 0.5, 1];
-  const anchors: Array<{ lat: number; lng: number; ocean: OceanSnapshot; weather: ReturnType<typeof weatherScoreForSatellite>; sstScore: number | null; chlScore: number | null; currentScore: number | null; depthScore: number | null; quality: number; }> = [];
-
-  for (const ay of anchorSteps) {
-    for (const ax of anchorSteps) {
-      const aLat = Number((maxLat - (maxLat - minLat) * ay).toFixed(6));
-      const aLng = Number((minLng + (maxLng - minLng) * ax).toFixed(6));
-      const ocean = await getOceanSnapshot(aLat, aLng);
-      const weather = weatherScoreForSatellite(ocean.marine);
-      const sstScore = sstScoreForTarget(input.speciesKey, target, ocean.sst_c);
-      const chlScore = chlorophyllScoreForTarget(target, ocean.chlorophyll_mg_m3);
-      const currentScore = ocean.current_speed_kts != null ? scoreRange(ocean.current_speed_kts, 0, 0.4, 2.2, 4.5) : null;
-      const depthScore = ocean.depth_m != null ? scoreRange(Math.abs(ocean.depth_m), 15, 40, 600, 2500) : null;
-      const quality = dataQualityScore(ocean);
-      anchors.push({ lat: aLat, lng: aLng, ocean, weather, sstScore, chlScore, currentScore, depthScore, quality });
-    }
-  }
-
-  function nearestAnchor(lat: number, lng: number) {
-    let best = anchors[0];
-    let bestD = Number.POSITIVE_INFINITY;
-    for (const a of anchors) {
-      const d = (a.lat - lat) ** 2 + (a.lng - lng) ** 2;
-      if (d < bestD) { best = a; bestD = d; }
-    }
-    return best;
-  }
-
-  const cells: SatelliteCell[] = [];
-
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const px = cols <= 1 ? 0.5 : x / (cols - 1);
-      const py = rows <= 1 ? 0.5 : y / (rows - 1);
-      const cellLat = Number((maxLat - (maxLat - minLat) * py).toFixed(6));
-      const cellLng = Number((minLng + (maxLng - minLng) * px).toFixed(6));
-      const a = nearestAnchor(cellLat, cellLng);
-      const species = speciesProfileScore(input.speciesKey, cellLat, cellLng);
-
-      // Ocean fronts/shelf/eddy bands create the continuous Rip-style heat surface.
-      // They are deterministic, area-specific and blended with the live anchor data above.
-      const frontLine = 0.50 + 0.18 * Math.sin(px * 9.2 + input.lng * 0.07) + 0.05 * Math.sin(px * 23.0 + input.lat * 0.05);
-      const thermalFront = Math.exp(-Math.abs(py - frontLine) * 10.5);
-      const shelfLine = 0.62 + 0.09 * Math.sin(py * 12.0 + input.lat * 0.09);
-      const shelfEdge = Math.exp(-Math.abs(px - shelfLine) * 13.0);
-      const eddyA = Math.sin((Math.hypot(px - 0.72, py - 0.36) * 20.0) + input.lng * 0.04);
-      const eddyB = Math.cos((px * 8.5 - py * 10.5) + input.lat * 0.06);
-      const eddyScore = clamp(Math.round(((eddyA + 1) * 0.5) * 8 + ((eddyB + 1) * 0.5) * 5), 0, 13);
-      const noise = satNoise(cellLat, cellLng, x + y * 41);
-
-      const liveOceanScore = (a.sstScore ?? 8) + (a.chlScore ?? 7) + (a.currentScore ?? 7) + Math.round((a.depthScore ?? 9) * 0.45);
-      const frontScore = Math.round(thermalFront * 20);
-      const shelfScore = Math.round(shelfEdge * 14);
-      const weatherScore = a.weather.score;
-      const quality = a.quality;
-
-      const score = clamp(Math.round(
-        (weatherScore * 0.22) +
-        (species.score * 0.20) +
-        liveOceanScore +
-        frontScore +
-        shelfScore +
-        eddyScore +
-        (noise * 5) +
-        quality
-      ), 0, 100);
-
-      const ocean = { ...a.ocean, location: { lat: cellLat, lng: cellLng }, generated_at: new Date().toISOString() } as OceanSnapshot;
-      const reasons = [
-        `Continuous heat cell: thermal front ${frontScore}/20, shelf edge ${shelfScore}/14`,
-        ...oceanSnapshotReasons(a.ocean, a.sstScore, a.chlScore),
-        ...species.reasons,
-        ...a.weather.reasons,
-      ].slice(0, 8);
-
-      cells.push({
-        id: `${cellLat.toFixed(4)},${cellLng.toFixed(4)},${input.speciesKey}`,
-        lat: cellLat,
-        lng: cellLng,
-        score,
-        signal: signalFromScore(score),
-        target_species: input.speciesKey,
-        target_species_label: target.label,
-        reasons,
-        ocean,
-        components: {
-          weather: weatherScore,
-          species: species.score,
-          sst: a.sstScore,
-          chlorophyll: a.chlScore,
-          current: a.currentScore,
-          depth: a.depthScore,
-          data_quality: quality,
-          front: frontScore,
-          shelf: shelfScore,
-          eddy: eddyScore,
-        },
-      });
-    }
-  }
-
-  return applyRelativeHotzoneSignals(cells);
-}
-
-function applyRelativeHotzoneSignals(cells: SatelliteCell[]) {
-  if (!cells.length) return cells;
-
-  // Keep the absolute score, but render the selected area as a relative heat field.
-  // Top water becomes hot, mid water becomes building, weak water becomes risk.
-  const scores = cells.map((c) => c.score).filter((n) => Number.isFinite(n));
-  const minScore = Math.min(...scores);
-  const maxScore = Math.max(...scores);
-  const range = Math.max(1, maxScore - minScore);
-  const sorted = [...cells].sort((a, b) => b.score - a.score);
-  const n = sorted.length;
-  const greenCount = Math.max(5, Math.round(n * 0.14));
-  const amberCount = Math.max(10, Math.round(n * 0.58));
-
-  sorted.forEach((cell, index) => {
-    const percentile = n <= 1 ? 100 : Math.round(((n - index) / n) * 100);
-    const normalized = clamp((cell.score - minScore) / range, 0, 1);
-    cell.relative_rank = index + 1;
-    cell.relative_percentile = percentile;
-    cell.normalized_heat = Number(normalized.toFixed(4));
-    cell.heat_alpha = Number((0.18 + normalized * 0.72).toFixed(4));
-
-    if (index < greenCount || normalized >= 0.82) cell.signal = "green";
-    else if (index < greenCount + amberCount || normalized >= 0.38) cell.signal = "amber";
-    else cell.signal = "red";
-
-    cell.signal_basis = "continuous_relative_heatmap";
-    const note = cell.signal === "green"
-      ? `Rip-style heat: top ${percentile}% of this selected ocean area`
-      : cell.signal === "amber"
-      ? `Building water: mid ${percentile}% of this selected ocean area`
-      : `Lower-priority water: bottom ${100 - percentile}% of this selected ocean area`;
-    cell.reasons = [note, ...(cell.reasons || [])].slice(0, 9);
-  });
-
-  return cells;
-}
-
-function satelliteCellBounds(cells: SatelliteCell[]) {
-  if (!cells.length) return null;
-  const lats = cells.map((c) => c.lat);
-  const lngs = cells.map((c) => c.lng);
-  return {
-    minLat: Math.min(...lats),
-    maxLat: Math.max(...lats),
-    minLng: Math.min(...lngs),
-    maxLng: Math.max(...lngs),
-  };
-}
-
-function summarizeSatelliteCells(cells: SatelliteCell[]) {
-  return cells.reduce((acc, cell) => {
-    acc[cell.signal] += 1;
-    return acc;
-  }, { green: 0, amber: 0, red: 0 } as Record<SatelliteSignal, number>);
-}
-
-function buildSatelliteInsights(speciesKey: string, layer: string, cells: SatelliteCell[]) {
-  const target = SATELLITE_TARGETS[speciesKey] || SATELLITE_TARGETS.black_marlin;
-  const best = [...cells].sort((a, b) => b.score - a.score)[0];
-  const summary = summarizeSatelliteCells(cells);
-  const liveSst = cells.filter((c) => c.ocean?.sources?.sst?.status === "live").length;
-  const liveChl = cells.filter((c) => c.ocean?.sources?.chlorophyll?.status === "live").length;
-  const liveWeather = cells.filter((c) => c.ocean?.marine?.source_status === "windy_live").length;
-  return [
-    {
-      title: `${target.label} behaviour model`,
-      body: `This scan favours ${target.prefers.slice(0, 4).join(", ")}. OceanCore scores cells where live ocean data and the species profile line up.`,
-    },
-    {
-      title: "Live data pull",
-      body: `Windy live cells: ${liveWeather}/${cells.length}. NOAA MUR SST cells: ${liveSst}/${cells.length}. Chlorophyll cells: ${liveChl}/${cells.length}${liveChl ? "." : " — add NOAA_CHL_ERDDAP_BASE when you pick the chlorophyll dataset."}`,
-    },
-    {
-      title: "Best cell",
-      body: best ? `Best current cell is ${best.score}/100 near ${best.lat.toFixed(3)}, ${best.lng.toFixed(3)} with ${best.signal.toUpperCase()} signal. SST ${best.ocean?.sst_c ?? "—"}°C, Chl ${best.ocean?.chlorophyll_mg_m3 ?? "—"} mg/m³.` : "No best cell yet.",
-    },
-    {
-      title: "Zone count",
-      body: `${summary.green} strong zones, ${summary.amber} medium zones and ${summary.red} avoid zones in this scan.`,
-    },
-  ];
-}
-
-function buildSatellitePlan(speciesKey: string, cells: SatelliteCell[]) {
-  const target = SATELLITE_TARGETS[speciesKey] || SATELLITE_TARGETS.black_marlin;
-  const best = [...cells].sort((a, b) => b.score - a.score)[0];
-  const confidence = best ? clamp(Math.round(best.score), 35, 92) : 50;
-  return {
-    heading: `${target.label} tactical plan`,
-    confidence,
-    body: best
-      ? `Start by checking the strongest edge near ${best.lat.toFixed(3)}, ${best.lng.toFixed(3)}. Work the colour break/current line, then adjust based on birds, bait and live sea state. Verify official forecasts before running offshore.`
-      : `Scan an area first, then use the strongest colour break and safest sea state as your first pass.`,
-  };
-}
-
-
-function xmlEscape(value: any) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function satNoise(lat: number, lng: number, seed = 1) {
-  const x = Math.sin((lat * 12.9898 + lng * 78.233 + seed * 37.719) * 0.91) * 43758.5453;
-  return x - Math.floor(x);
-}
-
-function satColour(value: number) {
-  const stops = [
-    { p: 0.00, c: [6, 8, 28] },
-    { p: 0.18, c: [23, 7, 65] },
-    { p: 0.38, c: [92, 20, 127] },
-    { p: 0.58, c: [178, 34, 120] },
-    { p: 0.78, c: [252, 110, 28] },
-    { p: 1.00, c: [255, 246, 104] },
-  ];
-  const v = clamp(value, 0, 1);
-  let a = stops[0], b = stops[stops.length - 1];
-  for (let i = 0; i < stops.length - 1; i++) {
-    if (v >= stops[i].p && v <= stops[i + 1].p) { a = stops[i]; b = stops[i + 1]; break; }
-  }
-  const t = (v - a.p) / Math.max(0.0001, b.p - a.p);
-  const rgb = a.c.map((n, i) => Math.round(n + (b.c[i] - n) * t));
-  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-}
-
-function generateSatelliteReportSvg(input: {
-  lat: number;
-  lng: number;
-  radiusKm: number;
-  speciesKey: string;
-  layer: string;
-  cells: SatelliteCell[];
-  summary: Record<SatelliteSignal, number>;
-  confidence: number;
-}) {
-  const target = SATELLITE_TARGETS[input.speciesKey] || SATELLITE_TARGETS.black_marlin;
-  const w = 1400, h = 820;
-  const plotX = 72, plotY = 72, plotW = 1120, plotH = 620;
-  const cols = 78, rows = 44;
-  const cellW = plotW / cols, cellH = plotH / rows;
-  const best = [...input.cells].sort((a, b) => b.score - a.score)[0];
-  const date = new Date().toISOString().slice(0, 10);
-  const layerLabel = input.layer.includes("chl") ? "Chl-a + thermal fronts + weather" : input.layer.includes("sst") ? "SST + thermal fronts + weather" : "OceanCore habitat score";
-  let rects = "";
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const px = x / (cols - 1), py = y / (rows - 1);
-      const lat = input.lat + (0.5 - py) * 4.2;
-      const lng = input.lng + (px - 0.5) * 5.6;
-      const edge1 = Math.sin((px * 9.0 + py * 3.5 + input.lat * 0.13) * Math.PI);
-      const edge2 = Math.cos((px * 3.4 - py * 8.2 + input.lng * 0.11) * Math.PI);
-      const swirl = Math.sin((Math.hypot(px - 0.72, py - 0.34) * 16.5) + edge2 * 1.2);
-      const front = Math.exp(-Math.abs((py - 0.52) - 0.18 * Math.sin(px * 10.5 + input.lng * 0.03)) * 9.5);
-      const shelf = Math.exp(-Math.abs((px - 0.64) - 0.08 * Math.sin(py * 12)) * 13);
-      const noise = satNoise(lat, lng, x + y * 11);
-      const speciesBoost = speciesProfileScore(input.speciesKey, lat, lng).score / 100;
-      let v = 0.16 + front * 0.34 + shelf * 0.26 + (edge1 + 1) * 0.08 + (swirl + 1) * 0.07 + noise * 0.10 + speciesBoost * 0.12;
-      if (input.layer.includes("chl")) v = v * 0.88 + Math.max(0, Math.sin(px * 13 + py * 8)) * 0.14;
-      if (input.layer.includes("sst")) v = v * 0.92 + Math.max(0, Math.cos(px * 7 - py * 10)) * 0.10;
-      v = clamp(v, 0, 1);
-      rects += `<rect x="${(plotX + x * cellW).toFixed(1)}" y="${(plotY + y * cellH).toFixed(1)}" width="${(cellW + 0.4).toFixed(1)}" height="${(cellH + 0.4).toFixed(1)}" fill="${satColour(v)}" opacity="${(0.78 + v * 0.18).toFixed(2)}"/>`;
-    }
-  }
-  const landPath = `M ${plotX + plotW * 0.58} ${plotY - 10} C ${plotX + plotW * 0.64} ${plotY + plotH * 0.08}, ${plotX + plotW * 0.62} ${plotY + plotH * 0.22}, ${plotX + plotW * 0.70} ${plotY + plotH * 0.34} C ${plotX + plotW * 0.76} ${plotY + plotH * 0.44}, ${plotX + plotW * 0.68} ${plotY + plotH * 0.58}, ${plotX + plotW * 0.74} ${plotY + plotH * 0.72} C ${plotX + plotW * 0.80} ${plotY + plotH * 0.83}, ${plotX + plotW * 0.70} ${plotY + plotH * 0.94}, ${plotX + plotW * 0.77} ${plotY + plotH + 18} L ${plotX + plotW + 30} ${plotY + plotH + 18} L ${plotX + plotW + 30} ${plotY - 18} Z`;
-  const gridLines = Array.from({ length: 7 }, (_, i) => { const x = plotX + (plotW / 6) * i; return `<line x1="${x}" y1="${plotY}" x2="${x}" y2="${plotY + plotH}" stroke="rgba(255,255,255,.10)" stroke-width="1"/>`; }).join("") + Array.from({ length: 5 }, (_, i) => { const y = plotY + (plotH / 4) * i; return `<line x1="${plotX}" y1="${y}" x2="${plotX + plotW}" y2="${y}" stroke="rgba(255,255,255,.10)" stroke-width="1"/>`; }).join("");
-  const axisLabels = Array.from({ length: 6 }, (_, i) => { const lx = input.lng - 2.8 + i * 1.12; const x = plotX + (plotW / 5) * i; return `<text x="${x}" y="${plotY + plotH + 28}" fill="#a9bfe5" font-size="18" text-anchor="middle">${lx.toFixed(1)}°E</text>`; }).join("") + Array.from({ length: 5 }, (_, i) => { const ly = input.lat + 2.1 - i * 1.05; const y = plotY + (plotH / 4) * i + 6; return `<text x="${plotX - 20}" y="${y}" fill="#a9bfe5" font-size="18" text-anchor="end">${Math.abs(ly).toFixed(1)}°S</text>`; }).join("");
-  const colourBar = Array.from({ length: 100 }, (_, i) => { const v = 1 - i / 99; return `<rect x="1238" y="${plotY + i * 5.2}" width="28" height="6" fill="${satColour(v)}"/>`; }).join("");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-  <rect width="100%" height="100%" fill="#020814"/>
-  <text x="${w / 2}" y="34" fill="#eaf3ff" font-family="Arial, sans-serif" font-weight="800" font-size="25" text-anchor="middle">OceanCore ${xmlEscape(target.label)} Habitat Suitability — ${date}</text>
-  <text x="${w / 2}" y="62" fill="#a9bfe5" font-family="Arial, sans-serif" font-weight="700" font-size="16" text-anchor="middle">${xmlEscape(layerLabel)} · Species model · Windy sea-state risk · ${input.radiusKm} km scan</text>
-  <clipPath id="plotClip"><rect x="${plotX}" y="${plotY}" width="${plotW}" height="${plotH}" rx="4"/></clipPath>
-  <g clip-path="url(#plotClip)">
-    <rect x="${plotX}" y="${plotY}" width="${plotW}" height="${plotH}" fill="#070b18"/>
-    ${rects}
-    ${gridLines}
-    <!-- Grey land mask: makes the report read like a proper oceanographic map, not an abstract blob. -->
-    <path d="${landPath}" fill="#3b4450" stroke="#e5edf7" stroke-width="2.2" opacity="0.98"/>
-    <path d="${landPath}" fill="none" stroke="#0a0f18" stroke-width="7" opacity="0.46"/>
-    <path d="${landPath}" fill="none" stroke="#9fb3c8" stroke-width="1" opacity="0.95"/>
-    <text x="${plotX + plotW * 0.78}" y="${plotY + plotH * 0.18}" fill="#dce7f5" font-family="Arial" font-size="18" font-weight="800" opacity="0.9">LAND</text>
-    ${best ? `<circle cx="${plotX + plotW * 0.48}" cy="${plotY + plotH * 0.48}" r="15" fill="none" stroke="#fff36b" stroke-width="4"/><text x="${plotX + plotW * 0.48 + 22}" y="${plotY + plotH * 0.48 + 6}" fill="#fff36b" font-family="Arial" font-size="18" font-weight="800">Best ${best.score}/100</text>` : ""}
-  </g>
-  <rect x="${plotX}" y="${plotY}" width="${plotW}" height="${plotH}" fill="none" stroke="#235a70" stroke-width="2"/>
-  ${axisLabels}
-  ${colourBar}
-  <text x="1278" y="${plotY + 5}" fill="#d8e7ff" font-size="15" font-family="Arial">1.0</text>
-  <text x="1278" y="${plotY + 260}" fill="#d8e7ff" font-size="15" font-family="Arial">0.5</text>
-  <text x="1278" y="${plotY + 520}" fill="#d8e7ff" font-size="15" font-family="Arial">0.0</text>
-  <text x="1328" y="${plotY + 290}" fill="#d8e7ff" font-size="16" font-family="Arial" transform="rotate(90 1328 ${plotY + 290})">Habitat Suitability Index</text>
-  <rect x="72" y="735" width="1050" height="58" rx="14" fill="#071222" stroke="#1d4258"/>
-  <text x="92" y="760" fill="#eaf3ff" font-family="Arial" font-weight="800" font-size="18">Strong zones: ${input.summary.green}  ·  Medium: ${input.summary.amber}  ·  Avoid: ${input.summary.red}  ·  Confidence: ${input.confidence}%</text>
-  <text x="92" y="784" fill="#a9bfe5" font-family="Arial" font-size="15">V1 generated report image. Grey land mask + lat/lon grid. Public satellite-data ingestion hooks are ready; verify official conditions before running offshore.</text>
-  <text x="1188" y="784" fill="#1fd5ff" font-family="Arial" font-size="16" font-weight="800">OceanCore AI</text>
-</svg>`;
-}
-
 function detectMode(question: string) {
   const q = question.toLowerCase();
   if (/(legal size|bag limit|regulation|rules|limit\b|closed season)/i.test(q))
@@ -2114,22 +2219,6 @@ async function saveAiChatMessageForUser(user: AuthUser, input: { session_id: str
   return normalizeAiChatMessage(res.data);
 }
 
-async function getLatestTacticalSnapshotForUser(user: AuthUser) {
-  if (!supabase) return null;
-  try {
-    const res = await supabase
-      .from(TACTICAL_SNAPSHOTS_TABLE)
-      .select("area_name,signal,confidence,headline,snapshot_json,created_at")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return res.data || null;
-  } catch {
-    return null;
-  }
-}
-
 async function listAiMemoryForUser(user: AuthUser) {
   if (!supabase) {
     return mem.aiMemory.filter((x: any) => (x.user_id || DEV_GUEST_USER_ID) === user.id);
@@ -2197,8 +2286,8 @@ function structuredOceanCoreSystemPrompt(mode: string) {
 You are not a generic chatbot. You are a practical Australian saltwater fishing assistant with strong Queensland / Moreton Bay / Gold Coast awareness when relevant.
 
 Your job:
-- Use the user's profile, saved areas, catch history, latest tactical snapshot, marine conditions, ramps/fuel, and chat history.
-- Give direct tactical advice that helps the user decide what to do next.
+- Use the user's profile, saved areas, catch history, marine conditions, ramps/fuel, and chat history.
+- Give direct practical advice that helps the user decide what to do next.
 - Never expose exact private GPS marks unless the user explicitly provided them in the current request and asks for them.
 - For public/share/community contexts, always keep locations "Spot Safe" and general.
 - Never promise safety. Always tell users to verify official forecasts, local rules, and seamanship requirements.
@@ -2229,7 +2318,6 @@ async function buildSmartReply(input: {
   const profile = await getProfileForUser(input.user).catch(() => null);
   const recentCatches = await listUserCatches(input.user, 12).catch(() => []);
   const savedAreas = await listSavedAreasForUser(input.user, 12).catch(() => []);
-  const latestSnapshot = await getLatestTacticalSnapshotForUser(input.user).catch(() => null);
   await refreshAiMemoryForUser(input.user, profile, recentCatches, savedAreas).catch(() => null);
   const memories = await listAiMemoryForUser(input.user).catch(() => []);
   const stats = summarizeCatchStats(recentCatches);
@@ -2266,7 +2354,6 @@ async function buildSmartReply(input: {
         privacy: a.privacy,
         notes: a.notes,
       })),
-      latest_tactical_snapshot: latestSnapshot,
       recent_catches: recentCatches,
       catch_stats: stats,
       now_iso: new Date().toISOString(),
@@ -2294,7 +2381,7 @@ async function buildSmartReply(input: {
         `Mode detected: ${mode}\n` +
         `Recent catches loaded: ${recentCatches.length}\n` +
         `Saved areas loaded: ${savedAreas.length}\n` +
-        `Once OPENAI_API_KEY is set, OceanCore AI Brain V12 will use profile, catches, saved areas, tactical snapshots, and conditions.`,
+        `Once OPENAI_API_KEY is set, OceanCore AI Brain V12 will use profile, catches, saved areas, marine conditions, ramps, and fuel context.`,
     };
   }
 
@@ -2384,11 +2471,16 @@ async function detectSpeciesFromPhoto(input: { photoDataUrl: string; notes?: str
 // ============================================================
 // Core routes
 // ============================================================
-app.get("/", async (_req, reply) => {
+app.get("/", async (req, reply) => {
+  const wantsHtml = String(req.headers.accept || "").includes("text/html");
+  if (wantsHtml && fs.existsSync(path.join(FRONTEND_DIR, "index.html"))) {
+    return reply.redirect("/app/");
+  }
   ok(reply, {
     success: true,
     name: "OceanCore AI Slim Beta Backend",
     build_id: BUILD_ID,
+    app: fs.existsSync(path.join(FRONTEND_DIR, "index.html")) ? "/app/" : null,
   });
 });
 
@@ -2405,17 +2497,38 @@ app.get("/health", async (_req, reply) => {
     openai: !!openai,
     windy_point_forecast_configured: !!WINDY_POINT_FORECAST_KEY,
     windy_key_source: WINDY_KEY_SOURCE,
+    geocode_search_configured: !!GEOCODE_SEARCH_URL,
+    geocode_countrycodes: GEOCODE_COUNTRYCODES || null,
     weather_api_key_alias_present: !!envValue("WEATHER_API_KEY"),
     stripe_configured: !!STRIPE_SECRET_KEY,
     stripe_starter_monthly_configured: !!STRIPE_PRICE_STARTER_MONTHLY,
     stripe_basic_monthly_configured: !!STRIPE_PRICE_BASIC_MONTHLY,
     stripe_pro_monthly_configured: !!STRIPE_PRICE_PRO_MONTHLY,
+    frontend_app_available: fs.existsSync(path.join(FRONTEND_DIR, "index.html")),
+    frontend_app_path: "/app/",
     catches_table: CATCHES_TABLE,
     profiles_table: PROFILES_TABLE,
     feedback_table: FEEDBACK_TABLE,
+    community_posts_table: COMMUNITY_POSTS_TABLE,
+    account_settings_table: ACCOUNT_SETTINGS_TABLE,
     audit_table: AUDIT_TABLE,
     using_profiles_table: !!PROFILES_TABLE,
     admin_enabled: ADMIN_EMAILS.length > 0 || ADMIN_USER_IDS.length > 0,
+    security_headers_enabled: SECURITY_HEADERS_ENABLED,
+    rate_limits_enabled: RATE_LIMITS_ENABLED,
+    trust_proxy: TRUST_PROXY,
+    body_limit_bytes: BODY_LIMIT_BYTES,
+    allowed_origin_count: EFFECTIVE_ALLOWED_ORIGINS.length,
+    native_app_origins: NATIVE_APP_ORIGINS,
+    upload_limits: {
+      avatar_image_max_bytes: AVATAR_IMAGE_MAX_BYTES,
+      catch_photo_max_bytes: CATCH_PHOTO_MAX_BYTES,
+      community_media_max_bytes: COMMUNITY_MEDIA_MAX_BYTES,
+      image_mime_types: [...IMAGE_UPLOAD_MIME_EXT.keys()],
+      community_media_mime_types: [...COMMUNITY_MEDIA_MIME_EXT.keys()],
+      strip_image_metadata: STRIP_IMAGE_UPLOAD_METADATA,
+      metadata_stripped_image_mime_types: METADATA_STRIPPED_IMAGE_MIME_TYPES,
+    },
     has_species_detect_route: true,
     species_detect_paths: [
       "/ai/species-detect",
@@ -2437,6 +2550,13 @@ app.get("/health", async (_req, reply) => {
       "admin_control_room",
       "feedback_reports",
       "audit_log",
+      "community",
+      "community_moderation",
+      "account_settings",
+      "data_export",
+      "boat_ai",
+      "boat_catalog",
+      "fuel_logs",
       "subscription_status",
       "stripe_checkout",
       "free_starter_basic_pro_plans",
@@ -2445,8 +2565,6 @@ app.get("/health", async (_req, reply) => {
       "predict",
       "patterns",
       "undersize",
-      "boat_ai",
-      "fuel_logs",
       "saved_ramps",
       "memory_pages",
       "web_learn",
@@ -2458,12 +2576,36 @@ app.get("/legal/docs", async (_req, reply) => {
   ok(reply, { success: true, ...LEGAL_DOCS });
 });
 
+app.get("/legal", async (_req, reply) => {
+  return sendLegalPage(reply, "Privacy Policy", LEGAL_DOCS.privacy, "privacy");
+});
+
+app.get("/legal/terms-of-service", async (_req, reply) => {
+  return sendLegalPage(reply, "Terms of Service", LEGAL_DOCS.terms, "terms");
+});
+
+app.get("/legal/privacy-policy", async (_req, reply) => {
+  return sendLegalPage(reply, "Privacy Policy", LEGAL_DOCS.privacy, "privacy");
+});
+
+app.get("/legal/account-deletion", async (_req, reply) => {
+  return sendLegalPage(reply, "Account Deletion and Data Rights", LEGAL_DOCS.data_rights, "data");
+});
+
+app.get("/legal/marine-disclaimer", async (_req, reply) => {
+  return sendLegalPage(reply, "Marine Disclaimer", LEGAL_DOCS.disclaimer, "disclaimer");
+});
+
 app.get("/legal/terms", async (_req, reply) => {
   ok(reply, { success: true, version: LEGAL_VERSION, text: LEGAL_DOCS.terms });
 });
 
 app.get("/legal/privacy", async (_req, reply) => {
   ok(reply, { success: true, version: LEGAL_VERSION, text: LEGAL_DOCS.privacy });
+});
+
+app.get("/legal/data-rights", async (_req, reply) => {
+  ok(reply, { success: true, version: LEGAL_VERSION, text: LEGAL_DOCS.data_rights });
 });
 
 app.get("/legal/disclaimer", async (_req, reply) => {
@@ -2618,6 +2760,45 @@ app.post("/auth/update-password", async (req, reply) => {
   }
 });
 
+app.post("/auth/avatar", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const body = (req.body || {}) as any;
+    const dataUrl = str(body.avatar_data_url || body.avatarDataUrl || body.data_url);
+    if (!isDataUrlImage(dataUrl)) throw new Error("Upload an image file for your avatar.");
+    const avatarUrl = await saveDataUrlImage(dataUrl, {
+      maxBytes: AVATAR_IMAGE_MAX_BYTES,
+      prefix: "avatar-",
+      label: "Avatar image",
+    });
+    const current = await getProfileForUser(user).catch(() => null);
+    const profile = await saveProfileForUser(user, {
+      ...(current || {}),
+      id: user.id,
+      email: user.email,
+      avatar_url: avatarUrl,
+    });
+    ok(reply, { success: true, avatar_url: makeAbsoluteMediaUrl(req, avatarUrl), profile });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+});
+
+app.patch("/auth/email", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const email = str((req.body as any)?.email).toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email address.");
+    if (!supabase) throw new Error("Email changes need Supabase auth configured.");
+    await supabase.auth.admin.updateUserById(user.id, { email } as any);
+    const current = await getProfileForUser(user).catch(() => null);
+    const profile = await saveProfileForUser({ ...user, email }, { ...(current || {}), id: user.id, email });
+    ok(reply, { success: true, message: "Email update started. You may need to confirm it by email.", profile });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+});
+
 app.post("/auth/logout", async (_req, reply) => {
   ok(reply, { success: true, message: "Signed out." });
 });
@@ -2626,6 +2807,10 @@ app.get("/auth/me", async (req, reply) => {
   try {
     const user = await getRequiredAuthUser(req);
     const profile = await getProfileForUser(user);
+    const accountSettings = await getAccountSettingsForUser(user).catch((error) => {
+      console.warn("account settings load failed", error);
+      return null;
+    });
     ok(reply, {
       success: true,
       user: {
@@ -2634,6 +2819,10 @@ app.get("/auth/me", async (req, reply) => {
         is_guest: user.isGuest,
       },
       profile,
+      settings: accountSettings?.settings || {},
+      settings_storage: accountSettings?.storage || "unavailable",
+      settings_warning: accountSettings?.warning || null,
+      settings_updated_at: accountSettings?.updated_at || null,
       legal: {
         version: profile.legal_version || LEGAL_VERSION,
         terms: !!profile.accepted_terms_at,
@@ -2648,6 +2837,38 @@ app.get("/auth/me", async (req, reply) => {
     });
   } catch (e) {
     fail(reply, e, 401);
+  }
+});
+
+app.get("/auth/settings", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const row = await getAccountSettingsForUser(user);
+    ok(reply, {
+      success: true,
+      settings: row.settings,
+      storage: row.storage,
+      warning: row.warning || null,
+      updated_at: row.updated_at || null,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 401);
+  }
+});
+
+app.patch("/auth/settings", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const row = await saveAccountSettingsForUser(user, req.body || {});
+    ok(reply, {
+      success: true,
+      settings: row.settings,
+      storage: row.storage,
+      warning: row.warning || null,
+      updated_at: row.updated_at || null,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 401);
   }
 });
 
@@ -2681,6 +2902,74 @@ app.patch("/auth/profile", async (req, reply) => {
     ok(reply, { success: true, profile: saved });
   } catch (e) {
     fail(reply, e, 401);
+  }
+});
+
+app.get("/auth/export-data", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const profile = await getProfileForUser(user);
+    const accountSettings = await getAccountSettingsForUser(user).catch(() => null);
+    const catches = await listUserCatches(user, 1000).catch(() => []);
+    const savedAreas = await listSavedAreasForUser(user, 1000).catch(() => []);
+    const community = await listCommunityPostsForUser(user, "").catch(() => ({ posts: [] as CommunityPostRow[], storage: "unavailable" }));
+    const feedback = supabase
+      ? await supabase.from(FEEDBACK_TABLE).select("id,type,message,page,status,created_at,updated_at").eq("user_id", user.id).limit(1000).then((r) => r.data || []).catch(() => [])
+      : mem.feedback.filter((row) => row.user_id === user.id || row.user_email === user.email);
+    const aiChats = await listAiChatSessionsForUser(user, 500).catch(() => []);
+    ok(reply, {
+      success: true,
+      exported_at: new Date().toISOString(),
+      user: { id: user.id, email: user.email },
+      profile,
+      settings: accountSettings?.settings || {},
+      catches,
+      saved_areas: savedAreas,
+      community_posts: community.posts,
+      feedback,
+      ai_chat_sessions: aiChats,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+});
+
+app.delete("/auth/account", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const confirm = str((req.body as any)?.confirm, "");
+    if (confirm !== "DELETE") throw new Error('Type DELETE to confirm account deletion.');
+
+    if (!supabase) {
+      mem.profiles.delete(user.id);
+      mem.accountSettings.delete(user.id);
+      mem.catches = mem.catches.filter((row) => row.user_id !== user.id);
+      mem.savedAreas = mem.savedAreas.filter((row) => row.user_id !== user.id);
+      mem.feedback = mem.feedback.filter((row) => row.user_id !== user.id);
+      mem.communityPosts = mem.communityPosts.map((row) => row.user_id === user.id ? normalizeCommunityPost({ ...row, status: "deleted" }) : row);
+      await writeLocalCommunityPosts(mem.communityPosts);
+      ok(reply, { success: true, deleted: true, storage: "local" });
+      return;
+    }
+
+    await Promise.allSettled([
+      supabase.from(CATCHES_TABLE).delete().eq("user_id", user.id),
+      supabase.from(SAVED_AREAS_TABLE).delete().eq("user_id", user.id),
+      supabase.from(FEEDBACK_TABLE).delete().eq("user_id", user.id),
+      supabase.from("community_likes").delete().eq("user_id", user.id),
+      supabase.from("community_comments").update({ status: "hidden", updated_at: new Date().toISOString() }).eq("user_id", user.id),
+      supabase.from("community_reports").delete().eq("user_id", user.id),
+      supabase.from(COMMUNITY_POSTS_TABLE).update({ status: "deleted", updated_at: new Date().toISOString() }).eq("user_id", user.id),
+      supabase.from(AI_CHAT_MESSAGES_TABLE).delete().eq("user_id", user.id),
+      supabase.from(AI_CHAT_SESSIONS_TABLE).delete().eq("user_id", user.id),
+      supabase.from(AI_MEMORY_TABLE).delete().eq("user_id", user.id),
+      supabase.from(ACCOUNT_SETTINGS_TABLE).delete().eq("user_id", user.id),
+      supabase.from(PROFILES_TABLE).delete().eq("id", user.id),
+    ]);
+    await supabase.auth.admin.deleteUser(user.id).catch((e) => console.warn("auth delete failed", e));
+    ok(reply, { success: true, deleted: true, storage: "supabase" });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
   }
 });
 
@@ -2780,8 +3069,7 @@ app.post("/catches/photo", async (req, reply) => {
     const body = (req.body || {}) as any;
     const photoDataUrl = str(body.photo_data_url);
     if (!isDataUrlImage(photoDataUrl)) {
-      reply.code(400).send({ success: false, error: "photo_data_url is required" });
-      return;
+      throw uploadError("photo_data_url must be a JPG, PNG, WebP, HEIC, or HEIF image.");
     }
     const photoUrl = await saveDataUrlImage(photoDataUrl);
     ok(reply, {
@@ -2804,6 +3092,8 @@ app.post("/catches", async (req, reply) => {
 
     if (!photoUrl && isDataUrlImage(photoDataUrl)) {
       photoUrl = await saveDataUrlImage(photoDataUrl);
+    } else if (!photoUrl && photoDataUrl) {
+      throw uploadError("Catch photo must be a JPG, PNG, WebP, HEIC, or HEIF image.");
     }
 
     const saved = await insertCatch(user, {
@@ -2813,6 +3103,8 @@ app.post("/catches", async (req, reply) => {
       legal_limit_cm: num(body.legal_limit_cm),
       lat: num(body.lat),
       lng: num(body.lng),
+      general_area: str(body.general_area) || null,
+      privacy: normalizeLocationPrivacy(body.privacy, "private"),
       notes: str(body.notes) || null,
       photo_url: photoUrl,
     });
@@ -2839,6 +3131,8 @@ app.post("/catches/with-photo", async (req, reply) => {
 
     if (!photoUrl && isDataUrlImage(photoDataUrl)) {
       photoUrl = await saveDataUrlImage(photoDataUrl);
+    } else if (!photoUrl && photoDataUrl) {
+      throw uploadError("Catch photo must be a JPG, PNG, WebP, HEIC, or HEIF image.");
     }
 
     const saved = await insertCatch(user, {
@@ -2848,6 +3142,8 @@ app.post("/catches/with-photo", async (req, reply) => {
       legal_limit_cm: num(body.legal_limit_cm),
       lat: num(body.lat),
       lng: num(body.lng),
+      general_area: str(body.general_area) || null,
+      privacy: normalizeLocationPrivacy(body.privacy, "private"),
       notes: str(body.notes) || null,
       photo_url: photoUrl,
     });
@@ -2891,6 +3187,18 @@ app.get("/api/stats", async (req, reply) => {
       success: true,
       stats: summarizeCatchStats(rows),
     });
+  } catch (e) {
+    fail(reply, e);
+  }
+});
+
+app.get("/api/geocode/search", async (req, reply) => {
+  try {
+    const query = str((req.query as any)?.q || (req.query as any)?.query);
+    const rawLimit = Number((req.query as any)?.limit || 5);
+    const limit = Number.isFinite(rawLimit) ? clamp(rawLimit, 1, 8) : 5;
+    const results = await searchGeocode(query, limit);
+    ok(reply, { success: true, query, results });
   } catch (e) {
     fail(reply, e);
   }
@@ -2969,114 +3277,10 @@ const marineHandler = async (req: any, reply: any) => {
   }
 };
 
-
-app.get("/api/ocean/snapshot", async (req, reply) => {
-  try {
-    const lat = num((req.query as any)?.lat);
-    const lng = num((req.query as any)?.lng);
-    if (lat == null || lng == null) {
-      reply.code(400).send({ success: false, error: "lat and lng are required" });
-      return;
-    }
-    ok(reply, await getOceanSnapshot(lat, lng));
-  } catch (e) {
-    fail(reply, e);
-  }
-});
-app.get("/api/ripstyle/snapshot", async (req, reply) => {
-  try {
-    const lat = num((req.query as any)?.lat);
-    const lng = num((req.query as any)?.lng);
-    if (lat == null || lng == null) {
-      reply.code(400).send({ success: false, error: "lat and lng are required" });
-      return;
-    }
-    ok(reply, await getOceanSnapshot(lat, lng));
-  } catch (e) {
-    fail(reply, e);
-  }
-});
-
-// Satellite Intel API routes removed for beta cleanup.
 app.get("/marine/forecast", marineHandler);
 app.get("/api/marine/forecast", marineHandler);
 app.get("/weather/marine", marineHandler);
 app.get("/api/weather/marine", marineHandler);
-
-
-
-
-type TacticalSnapshotPayload = {
-  saved_area_id?: string | null;
-  lat?: number | null;
-  lng?: number | null;
-  radius_km?: number | null;
-  area_name?: string | null;
-};
-
-function tacticalSignalFromMarine(marine: any) {
-  const current = marine?.current || (Array.isArray(marine?.hours) ? marine.hours[0] : null) || null;
-  const wind = Number(current?.wind_kts || 0);
-  const wave = Number(current?.wave_m || 0);
-  const swell = Number(current?.swell_m || 0);
-  if ((wind && wind >= 22) || (wave && wave >= 1.5) || (swell && swell >= 1.7)) return "red";
-  if ((wind && wind >= 14) || (wave && wave >= 0.8) || (swell && swell >= 1.0)) return "amber";
-  return "green";
-}
-
-function tacticalConfidence(signal: string, hasMarine: boolean, recentCatchCount: number) {
-  let score = hasMarine ? 68 : 45;
-  if (recentCatchCount >= 3) score += 12;
-  if (recentCatchCount >= 8) score += 8;
-  if (signal === "green") score += 6;
-  if (signal === "red") score -= 4;
-  return clamp(score, 35, 92);
-}
-
-function normalizeSnapshotConfidence(raw: any, fallback: number) {
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return Math.round(clamp(fallback, 0, 100));
-  const percent = n > 0 && n <= 1 ? n * 100 : n;
-  return Math.round(clamp(percent, 0, 100));
-}
-
-function fallbackTacticalSnapshot(args: { areaName: string; lat: number | null; lng: number | null; radiusKm: number; marine: any; catches: CatchRow[] }) {
-  const signal = tacticalSignalFromMarine(args.marine);
-  const current = args.marine?.current || (Array.isArray(args.marine?.hours) ? args.marine.hours[0] : {}) || {};
-  const topSpecies = summarizeCatchStats(args.catches || []).top_species?.[0]?.species || "local target species";
-  const wind = current?.wind_kts != null ? `${current.wind_kts} kt wind` : "wind data limited";
-  const wave = current?.wave_m != null ? `${current.wave_m} m wave` : "wave data limited";
-  const swell = current?.swell_m != null ? `${current.swell_m} m swell` : "swell data limited";
-  const headline = signal === "green" ? "Good window if your local wind and tide line up." : signal === "amber" ? "Fishable, but pick protected water and stay flexible." : "High caution. Check conditions carefully before launching.";
-  const bestWindow = signal === "green" ? "Early morning or the cleanest tide change." : signal === "amber" ? "Short session around the calmest part of the day." : "Wait for a safer weather window unless you have protected options.";
-  return { success: true, snapshot: { area_name: args.areaName, signal, confidence: tacticalConfidence(signal, !!args.marine, args.catches.length), headline, target_species: [topSpecies], best_window: bestWindow, technique: signal === "red" ? "Do not force exposed water. Focus only on safe sheltered options." : "Start with structure edges, bait schools, current lines, and recent productive zones.", conditions_summary: `${wind} · ${wave} · ${swell}`, safety_notes: signal === "red" ? "Red signal means conditions may be risky. Verify official forecasts and use seamanship." : "Verify marine forecasts, carry safety gear, and do not rely on AI as your only source.", ai_notes: "Generated from selected area, latest marine forecast, and your recent catch history.", created_at: new Date().toISOString() } };
-}
-
-async function buildTacticalSnapshot(user: AuthUser, payload: TacticalSnapshotPayload) {
-  const lat = payload.lat != null ? Number(payload.lat) : null;
-  const lng = payload.lng != null ? Number(payload.lng) : null;
-  const radiusKm = payload.radius_km != null ? Number(payload.radius_km) : 35;
-  const areaName = str(payload.area_name, "Selected Area");
-  let marine: any = null;
-  try { if (lat != null && lng != null && Number.isFinite(lat) && Number.isFinite(lng)) marine = await getMarineForecast(lat, lng); } catch { marine = null; }
-  const catches = await listUserCatches(user, 20).catch(() => []);
-  if (!openai) return fallbackTacticalSnapshot({ areaName, lat, lng, radiusKm, marine, catches });
-  const current = marine?.current || (Array.isArray(marine?.hours) ? marine.hours[0] : {}) || {};
-  const recentCatches = catches.slice(0, 8).map((c) => ({ species: c.species, length_cm: c.length_cm, weight_kg: c.weight_kg, is_legal: c.is_legal, notes: c.notes, created_at: c.created_at }));
-  const system = `You are OceanCore AI's Tactical Snapshot engine for Australian saltwater fishing. Return ONLY valid JSON with this exact shape: {"signal":"green|amber|red","confidence":number,"headline":string,"target_species":string[],"best_window":string,"technique":string,"conditions_summary":string,"safety_notes":string,"ai_notes":string}. Confidence MUST be a whole number from 0 to 100, for example 70, not 0.7. Keep it practical, never reveal exact GPS, and do not pretend to know official regulations.`;
-  try {
-    const completion = await openai.chat.completions.create({ model: OPENAI_CHAT_MODEL, temperature: 0.35, messages: [{ role: "system", content: system }, { role: "user", content: JSON.stringify({ area: { area_name: areaName, lat, lng, radius_km: radiusKm }, marine_current: current, marine_signal: marine?.signal || null, recent_catches: recentCatches, now_iso: new Date().toISOString() }) }] });
-    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
-    const signal = ["green", "amber", "red"].includes(String(parsed.signal)) ? String(parsed.signal) : tacticalSignalFromMarine(marine);
-    return { success: true, snapshot: { area_name: areaName, signal, confidence: normalizeSnapshotConfidence(parsed.confidence, tacticalConfidence(signal, !!marine, catches.length)), headline: str(parsed.headline, "Tactical snapshot ready."), target_species: Array.isArray(parsed.target_species) ? parsed.target_species.slice(0, 4).map((x: any) => String(x)) : [], best_window: str(parsed.best_window, "Use the safest cleanest weather window."), technique: str(parsed.technique, "Fish structure edges, current lines, and bait activity."), conditions_summary: str(parsed.conditions_summary, "Conditions summary unavailable."), safety_notes: str(parsed.safety_notes, "Always verify conditions and safety requirements independently."), ai_notes: str(parsed.ai_notes, "Generated from current app context."), created_at: new Date().toISOString() } };
-  } catch { return fallbackTacticalSnapshot({ areaName, lat, lng, radiusKm, marine, catches }); }
-}
-
-async function saveTacticalSnapshot(user: AuthUser, snapshot: any, payload: TacticalSnapshotPayload) {
-  if (!supabase || user.isGuest) return snapshot;
-  try { await supabase.from(TACTICAL_SNAPSHOTS_TABLE).insert({ user_id: user.id, saved_area_id: payload.saved_area_id || null, area_name: snapshot.area_name || null, lat: payload.lat ?? null, lng: payload.lng ?? null, radius_km: payload.radius_km ?? null, signal: snapshot.signal || null, confidence: snapshot.confidence ?? null, headline: snapshot.headline || null, snapshot_json: snapshot }); } catch (e) { console.warn("saveTacticalSnapshot failed", e); }
-  return snapshot;
-}
 
 const speciesDetectHandler = async (req: any, reply: any) => {
   try {
@@ -3244,15 +3448,22 @@ app.post("/ai/chat/smart", async (req, reply) => {
     }
 
     const usageBefore = await enforceAiLimitOrThrow(user);
-    const session = await ensureAiChatSessionForUser(user, str(body.session_id, ""), chatTitleFromQuestion(question));
-    const priorMessages = await listAiChatMessagesForUser(user, session.id, 24).catch(() => []);
+    const saveHistory = body.save_history !== false && body.context?.ai_settings?.save_chat_history !== false;
+    const session = saveHistory
+      ? await ensureAiChatSessionForUser(user, str(body.session_id, ""), chatTitleFromQuestion(question))
+      : null;
+    const priorMessages = session
+      ? await listAiChatMessagesForUser(user, session.id, 24).catch(() => [])
+      : [];
 
-    const userMessage = await saveAiChatMessageForUser(user, {
-      session_id: session.id,
-      role: "user",
-      content: question,
-      mode: detectMode(question),
-    });
+    const userMessage = session
+      ? await saveAiChatMessageForUser(user, {
+          session_id: session.id,
+          role: "user",
+          content: question,
+          mode: detectMode(question),
+        })
+      : null;
 
     const mergedHistory = [
       ...priorMessages.map((m) => ({ role: m.role, content: m.content })),
@@ -3266,23 +3477,26 @@ app.post("/ai/chat/smart", async (req, reply) => {
       user,
     });
 
-    const assistantMessage = await saveAiChatMessageForUser(user, {
-      session_id: session.id,
-      role: "assistant",
-      content: result.answer || "No answer returned.",
-      mode: result.mode,
-    });
+    const assistantMessage = session
+      ? await saveAiChatMessageForUser(user, {
+          session_id: session.id,
+          role: "assistant",
+          content: result.answer || "No answer returned.",
+          mode: result.mode,
+        })
+      : null;
 
-    if (session.title === "New chat" || !session.title) {
+    if (session && (session.title === "New chat" || !session.title)) {
       await touchAiChatSession(session.id, user, { title: chatTitleFromQuestion(question) });
     }
 
     const usedAfter = await incrementAiUsageCount(user, usageBefore.date);
     ok(reply, {
       ...result,
-      session_id: session.id,
+      session_id: session?.id || null,
       user_message: userMessage,
       assistant_message: assistantMessage,
+      saved_history: saveHistory,
       usage: {
         date: usageBefore.date,
         used: usedAfter,
@@ -3339,9 +3553,9 @@ type BillingInterval = "monthly" | "yearly";
 
 const PLAN_CATALOG: Record<PlanKey, any> = {
   free: { key: "free", name: "Free", price_label: "A$0", ads_enabled: true, ai_daily_limit: 5, saved_area_limit: 3, catch_card_level: "basic", features: ["Catch log", "Basic AI limits", "Basic map and conditions", "Catch cards with OceanCore branding", "Ads shown"] },
-  starter: { key: "starter", name: "Starter", price_label: "A$3.99/mo", ads_enabled: false, ai_daily_limit: 20, saved_area_limit: 8, catch_card_level: "standard", features: ["No ads", "20 AI questions/day", "8 saved areas", "Standard catch cards", "Basic trip snapshot"] },
+  starter: { key: "starter", name: "Starter", price_label: "A$3.99/mo", ads_enabled: false, ai_daily_limit: 20, saved_area_limit: 8, catch_card_level: "standard", features: ["No ads", "20 AI questions/day", "8 saved areas", "Standard catch cards", "Basic trip planning"] },
   basic: { key: "basic", name: "Basic", price_label: "A$7.99/mo", ads_enabled: false, ai_daily_limit: 50, saved_area_limit: 20, catch_card_level: "full", features: ["No ads", "50 AI questions/day", "20 saved areas", "Full catch cards", "Trip history"] },
-  pro: { key: "pro", name: "Pro", price_label: "A$15.99/mo", ads_enabled: false, ai_daily_limit: 200, saved_area_limit: 9999, catch_card_level: "advanced", features: ["No ads", "High-limit AI", "Advanced tactical snapshot", "Pattern insights", "Early Boat AI/sensor access"] },
+  pro: { key: "pro", name: "Pro", price_label: "A$15.99/mo", ads_enabled: false, ai_daily_limit: 200, saved_area_limit: 9999, catch_card_level: "advanced", features: ["No ads", "High-limit AI", "Advanced catch insights", "Pattern insights", "Early Boat AI/sensor access"] },
   founder: { key: "founder", name: "Founder", price_label: "Internal", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "advanced", features: ["Full access", "Admin/founder controls", "No ads", "All beta features"] },
 };
 
@@ -3533,7 +3747,7 @@ function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) 
 
 app.get("/billing/plans", async (_req, reply) => { ok(reply, { success: true, plans: PLAN_CATALOG, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: { starter_monthly: !!STRIPE_PRICE_STARTER_MONTHLY, starter_yearly: !!STRIPE_PRICE_STARTER_YEARLY, basic_monthly: !!STRIPE_PRICE_BASIC_MONTHLY, basic_yearly: !!STRIPE_PRICE_BASIC_YEARLY, pro_monthly: !!STRIPE_PRICE_PRO_MONTHLY, pro_yearly: !!STRIPE_PRICE_PRO_YEARLY } }); });
 
-app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, plans: PLAN_CATALOG }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: { starter_monthly: !!STRIPE_PRICE_STARTER_MONTHLY, starter_yearly: !!STRIPE_PRICE_STARTER_YEARLY, basic_monthly: !!STRIPE_PRICE_BASIC_MONTHLY, basic_yearly: !!STRIPE_PRICE_BASIC_YEARLY, pro_monthly: !!STRIPE_PRICE_PRO_MONTHLY, pro_yearly: !!STRIPE_PRICE_PRO_YEARLY }, plans: PLAN_CATALOG }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 app.get("/billing/usage", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const ai_usage = await getAiUsageStatus(user, profile); ok(reply, { success: true, ai_usage, entitlements: ai_usage.entitlements }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
 app.post("/billing/checkout", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const body = (req.body || {}) as any; const plan = String(body.plan || "").toLowerCase(); const interval = String(body.interval || "monthly").toLowerCase() as BillingInterval; if (!["starter", "basic", "pro"].includes(plan)) throw new Error("Choose starter, basic or pro plan."); const priceId = stripePriceFor(plan, interval); if (!priceId) throw new Error(`Stripe price ID missing for ${plan} ${interval}. Add it to backend .env.`); const profile = await getBillingProfile(user); const base = getFrontendBaseUrl(req); const params: Record<string, any> = { mode: "subscription", "line_items[0][price]": priceId, "line_items[0][quantity]": 1, success_url: `${base}/?billing=success&plan=${encodeURIComponent(plan)}`, cancel_url: `${base}/?billing=cancelled`, client_reference_id: user.id, "metadata[user_id]": user.id, "metadata[email]": user.email || "", "metadata[plan]": plan, "metadata[interval]": interval, "subscription_data[metadata][user_id]": user.id, "subscription_data[metadata][email]": user.email || "", "subscription_data[metadata][plan]": plan, "subscription_data[metadata][interval]": interval, allow_promotion_codes: "true" }; if (profile.stripe_customer_id) params.customer = profile.stripe_customer_id; else if (user.email) params.customer_email = user.email; const session = await stripeRequest("/checkout/sessions", params); ok(reply, { success: true, url: session.url, id: session.id }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
@@ -3738,6 +3952,7 @@ function buildSystemHealth() {
       audit: AUDIT_TABLE,
       usage: USAGE_TABLE,
       saved_areas: SAVED_AREAS_TABLE,
+      community_posts: COMMUNITY_POSTS_TABLE,
       ai_chat_sessions: AI_CHAT_SESSIONS_TABLE,
       ai_chat_messages: AI_CHAT_MESSAGES_TABLE,
       ai_memory: AI_MEMORY_TABLE,
@@ -3926,6 +4141,659 @@ app.delete("/saved-areas/:id", async (req, reply) => {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
 });
+
+// ============================================================
+// Community - real feed storage, media upload, and filters
+// ============================================================
+const COMMUNITY_POST_SELECT =
+  "id,user_id,user_email,author_name,title,species,general_area,caption,category,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,created_at,updated_at";
+const COMMUNITY_COMMENT_SELECT =
+  "id,post_id,user_id,user_email,author_name,body,status,created_at,updated_at";
+const COMMUNITY_REPORT_SELECT =
+  "id,post_id,user_id,user_email,reason,notes,status,created_at,updated_at";
+
+function normalizeCommunityCategory(input: any, fallbackText = "") {
+  const raw = str(input, "").toLowerCase();
+  if (["feed", "reports", "build"].includes(raw)) return raw;
+  const text = fallbackText.toLowerCase();
+  if (/(ramp|weather|wind|swell|tide|water|clarity|report|conditions|bar crossing|fuel)/i.test(text)) return "reports";
+  if (/(build|release|feature|beta|app update|bug|fixed|roadmap)/i.test(text)) return "build";
+  return "feed";
+}
+
+function normalizeCommunityPrivacy(input: any) {
+  const raw = str(input, "public").toLowerCase();
+  return ["public", "area_only", "private"].includes(raw) ? raw : "public";
+}
+
+function normalizeCommunityCommentPermission(input: any) {
+  const raw = str(input, "everyone").toLowerCase();
+  return ["everyone", "followers", "off"].includes(raw) ? raw : "everyone";
+}
+
+function normalizeCommunityUploadQuality(input: any) {
+  const raw = str(input, "hd").toLowerCase();
+  return ["data_saver", "standard", "hd"].includes(raw) ? raw : "hd";
+}
+
+function normalizeBlockedWords(input: any) {
+  const words = Array.isArray(input)
+    ? input
+    : str(input, "")
+        .split(/[\n,]/)
+        .map((word) => word.trim());
+
+  return words
+    .map((word) => str(word, "").toLowerCase().replace(/[^\p{L}\p{N}\s'-]/gu, "").trim())
+    .filter((word) => word.length >= 2)
+    .slice(0, 80)
+    .join(", ");
+}
+
+function communityBlockedWordsList(post: CommunityPostRow) {
+  return str(post.blocked_words, "")
+    .split(",")
+    .map((word) => word.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function communityCommentStatusFor(post: CommunityPostRow, body: string) {
+  if (post.allow_comments === false || post.comment_permission === "off") {
+    throw uploadError("Comments are turned off for this post.", 403);
+  }
+
+  const lower = body.toLowerCase();
+  const hasLink = /\b(?:https?:\/\/|www\.|[a-z0-9-]+\.[a-z]{2,})(?:\S*)/i.test(body);
+  const blocked = communityBlockedWordsList(post).some((word) => lower.includes(word));
+  if ((post.hold_link_comments && hasLink) || blocked) return "held";
+  return "active";
+}
+
+function normalizeCommunityPost(row: any = {}): CommunityPostRow {
+  const caption = str(row.caption, "").slice(0, 2200);
+  const species = str(row.species, "").slice(0, 100) || null;
+  const title = str(row.title, species || "OceanCore update").slice(0, 140);
+  const category = normalizeCommunityCategory(row.category, `${title} ${caption} ${row.general_area || ""}`);
+  const created = row.created_at || new Date().toISOString();
+  const commentPermission = normalizeCommunityCommentPermission(row.comment_permission);
+  const allowComments = row.allow_comments == null ? commentPermission !== "off" : !!row.allow_comments;
+  return {
+    id: String(row.id || crypto.randomUUID()),
+    user_id: row.user_id ?? null,
+    user_email: row.user_email ?? null,
+    author_name: str(row.author_name, row.user_email || "OceanCore fisher").slice(0, 100),
+    title,
+    species,
+    general_area: str(row.general_area, "Spot Safe").slice(0, 140),
+    caption,
+    category,
+    privacy: normalizeCommunityPrivacy(row.privacy),
+    media_url: str(row.media_url, "") || null,
+    media_mime: str(row.media_mime, "").slice(0, 80) || null,
+    media_type: str(row.media_type, "").slice(0, 20) || null,
+    allow_comments: allowComments,
+    comment_permission: allowComments ? commentPermission : "off",
+    hold_link_comments: row.hold_link_comments == null ? true : !!row.hold_link_comments,
+    blocked_words: normalizeBlockedWords(row.blocked_words),
+    upload_quality: normalizeCommunityUploadQuality(row.upload_quality),
+    status: str(row.status, "active").slice(0, 30),
+    likes_count: Number(row.likes_count || 0),
+    comments_count: Number(row.comments_count || 0),
+    created_at: created,
+    updated_at: row.updated_at || created,
+  };
+}
+
+function normalizeCommunityComment(row: any = {}): CommunityCommentRow {
+  const created = row.created_at || new Date().toISOString();
+  return {
+    id: String(row.id || crypto.randomUUID()),
+    post_id: String(row.post_id || ""),
+    user_id: row.user_id ?? null,
+    user_email: row.user_email ?? null,
+    author_name: str(row.author_name, row.user_email || "OceanCore fisher").slice(0, 100),
+    body: str(row.body, "").slice(0, 1000),
+    status: str(row.status, "active").slice(0, 30),
+    created_at: created,
+    updated_at: row.updated_at || created,
+  };
+}
+
+function normalizeCommunityReport(row: any = {}): CommunityReportRow {
+  const created = row.created_at || new Date().toISOString();
+  return {
+    id: String(row.id || crypto.randomUUID()),
+    post_id: String(row.post_id || ""),
+    user_id: row.user_id ?? null,
+    user_email: row.user_email ?? null,
+    reason: str(row.reason, "report").slice(0, 80),
+    notes: str(row.notes, "").slice(0, 1000) || null,
+    status: str(row.status, "open").slice(0, 30),
+    created_at: created,
+    updated_at: row.updated_at || created,
+  };
+}
+
+function communityPostVisibleToUser(post: CommunityPostRow, user: AuthUser) {
+  if (post.status === "hidden" || post.status === "deleted") return false;
+  return post.privacy !== "private" || post.user_id === user.id;
+}
+
+function communityPostMatchesFilter(post: CommunityPostRow, filter: string) {
+  const tab = String(filter || "feed").toLowerCase();
+  if (tab === "reports") return post.category === "reports";
+  if (tab === "build") return post.category === "build";
+  return true;
+}
+
+async function getCommunityWriteUser(req: any): Promise<AuthUser> {
+  return supabase ? getRequiredAuthUser(req) : getAuthUser(req);
+}
+
+async function readLocalCommunityPosts(): Promise<CommunityPostRow[]> {
+  try {
+    const raw = await fs.promises.readFile(COMMUNITY_POSTS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const posts = Array.isArray(parsed) ? parsed.map(normalizeCommunityPost) : [];
+    mem.communityPosts = posts;
+    return posts;
+  } catch {
+    return mem.communityPosts;
+  }
+}
+
+async function writeLocalCommunityPosts(posts: CommunityPostRow[]) {
+  mem.communityPosts = posts.slice(0, 200);
+  await fs.promises.writeFile(COMMUNITY_POSTS_FILE, JSON.stringify(mem.communityPosts, null, 2), "utf8");
+}
+
+async function readLocalCommunityComments(): Promise<CommunityCommentRow[]> {
+  try {
+    const raw = await fs.promises.readFile(COMMUNITY_COMMENTS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? parsed.map(normalizeCommunityComment) : [];
+    mem.communityComments = rows;
+    return rows;
+  } catch {
+    return mem.communityComments;
+  }
+}
+
+async function writeLocalCommunityComments(rows: CommunityCommentRow[]) {
+  mem.communityComments = rows.slice(-1000);
+  await fs.promises.writeFile(COMMUNITY_COMMENTS_FILE, JSON.stringify(mem.communityComments, null, 2), "utf8");
+}
+
+async function readLocalCommunityReports(): Promise<CommunityReportRow[]> {
+  try {
+    const raw = await fs.promises.readFile(COMMUNITY_REPORTS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? parsed.map(normalizeCommunityReport) : [];
+    mem.communityReports = rows;
+    return rows;
+  } catch {
+    return mem.communityReports;
+  }
+}
+
+async function writeLocalCommunityReports(rows: CommunityReportRow[]) {
+  mem.communityReports = rows.slice(-1000);
+  await fs.promises.writeFile(COMMUNITY_REPORTS_FILE, JSON.stringify(mem.communityReports, null, 2), "utf8");
+}
+
+async function readLocalCommunityLikes() {
+  try {
+    const raw = await fs.promises.readFile(COMMUNITY_LIKES_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? parsed : [];
+    mem.communityLikes = rows;
+    return rows as typeof mem.communityLikes;
+  } catch {
+    return mem.communityLikes;
+  }
+}
+
+async function writeLocalCommunityLikes(rows: typeof mem.communityLikes) {
+  mem.communityLikes = rows.slice(-5000);
+  await fs.promises.writeFile(COMMUNITY_LIKES_FILE, JSON.stringify(mem.communityLikes, null, 2), "utf8");
+}
+
+async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{ posts: CommunityPostRow[]; storage: string }> {
+  if (supabase) {
+    try {
+      const res = await supabase
+        .from(COMMUNITY_POSTS_TABLE)
+        .select(COMMUNITY_POST_SELECT)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (res.error) throw res.error;
+      return {
+        posts: (res.data || [])
+          .map(normalizeCommunityPost)
+          .filter((post) => communityPostVisibleToUser(post, user))
+          .filter((post) => communityPostMatchesFilter(post, filter)),
+        storage: "supabase",
+      };
+    } catch (e) {
+      console.warn("community posts supabase list failed, using local storage", e);
+    }
+  }
+
+  const posts = await readLocalCommunityPosts();
+  const comments = await readLocalCommunityComments();
+  const likes = await readLocalCommunityLikes();
+  return {
+    posts: posts
+      .map((post) => ({
+        ...post,
+        comments_count: comments.filter((row) => row.post_id === post.id && row.status === "active").length,
+        likes_count: likes.filter((row) => row.post_id === post.id).length,
+      }))
+      .filter((post) => communityPostVisibleToUser(post, user))
+      .filter((post) => communityPostMatchesFilter(post, filter))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))),
+    storage: "local",
+  };
+}
+
+async function saveCommunityPost(row: CommunityPostRow): Promise<{ post: CommunityPostRow; storage: string }> {
+  if (supabase) {
+    try {
+      const saved = await supabase
+        .from(COMMUNITY_POSTS_TABLE)
+        .insert(row)
+        .select(COMMUNITY_POST_SELECT)
+        .single();
+      if (saved.error) throw saved.error;
+      return { post: normalizeCommunityPost(saved.data), storage: "supabase" };
+    } catch (e) {
+      console.warn("community posts supabase insert failed, using local storage", e);
+    }
+  }
+
+  const posts = await readLocalCommunityPosts();
+  posts.unshift(row);
+  await writeLocalCommunityPosts(posts);
+  return { post: row, storage: "local" };
+}
+
+function withPublicCommunityMedia(req: any, post: CommunityPostRow) {
+  return {
+    ...post,
+    media_url: makeAbsoluteMediaUrl(req, post.media_url),
+  };
+}
+
+async function communityPostsHandler(req: any, reply: any) {
+  try {
+    const user = await getAuthUser(req);
+    const filter = str(req.query?.filter, "");
+    const result = await listCommunityPostsForUser(user, filter);
+    ok(reply, {
+      success: true,
+      posts: result.posts.map((post) => withPublicCommunityMedia(req, post)),
+      storage: result.storage,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function createCommunityPostHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const profile = await getProfileForUser(user).catch(() => null);
+    const body = (req.body || {}) as any;
+    const caption = str(body.caption, "").slice(0, 2200);
+    const species = str(body.species, "").slice(0, 100);
+    const mediaDataUrl = str(body.media_data_url, "");
+    let mediaUrl = str(body.media_url, "");
+    let mediaMime = str(body.media_mime, "").slice(0, 80);
+    let mediaType = str(body.media_type, "").slice(0, 20);
+
+    if (!caption && !species && !mediaDataUrl && !mediaUrl) {
+      throw new Error("Add a caption, topic, photo, or video first.");
+    }
+
+    if (mediaDataUrl) {
+      if (isDataUrlMedia(mediaDataUrl)) {
+        const saved = await saveDataUrlMedia(mediaDataUrl);
+        mediaUrl = saved.url;
+        mediaMime = saved.mime;
+        mediaType = saved.type;
+      } else if (/^https:\/\//i.test(mediaDataUrl) || mediaDataUrl.startsWith("/media/")) {
+        mediaUrl = mediaDataUrl;
+      } else {
+        throw new Error("Community media must be an image/video upload or an existing media URL.");
+      }
+    }
+
+    if (mediaUrl && !/^https:\/\//i.test(mediaUrl) && !mediaUrl.startsWith("/media/")) {
+      throw new Error("Community media URL must be an uploaded OceanCore file or an HTTPS URL.");
+    }
+
+    const authorName =
+      str(body.author_name, "") ||
+      str(profile?.full_name, "") ||
+      str(profile?.username, "") ||
+      str(user.email, "") ||
+      "OceanCore fisher";
+    const title = species || str(body.title, "") || (caption ? caption.split(/[.!?\n]/)[0] : "OceanCore update");
+    const category = normalizeCommunityCategory(body.category, `${title} ${caption} ${body.general_area || ""}`);
+    const commentPermission = normalizeCommunityCommentPermission(body.comment_permission);
+    const allowComments = body.allow_comments == null ? commentPermission !== "off" : !!body.allow_comments;
+    const now = new Date().toISOString();
+    const row = normalizeCommunityPost({
+      id: crypto.randomUUID(),
+      user_id: user.id,
+      user_email: user.email ?? null,
+      author_name: authorName,
+      title,
+      species,
+      general_area: str(body.general_area, "Spot Safe"),
+      caption,
+      category,
+      privacy: body.privacy,
+      media_url: mediaUrl,
+      media_mime: mediaMime,
+      media_type: mediaType || (mediaMime.startsWith("video/") ? "video" : mediaMime ? "image" : ""),
+      allow_comments: allowComments,
+      comment_permission: allowComments ? commentPermission : "off",
+      hold_link_comments: body.hold_link_comments == null ? true : !!body.hold_link_comments,
+      blocked_words: normalizeBlockedWords(body.blocked_words),
+      upload_quality: normalizeCommunityUploadQuality(body.upload_quality),
+      likes_count: 0,
+      comments_count: 0,
+      created_at: now,
+      updated_at: now,
+    });
+
+    const saved = await saveCommunityPost(row);
+    ok(reply, {
+      success: true,
+      post: withPublicCommunityMedia(req, saved.post),
+      storage: saved.storage,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function findCommunityPostById(id: string): Promise<CommunityPostRow | null> {
+  if (!id) return null;
+  if (supabase) {
+    try {
+      const res = await supabase.from(COMMUNITY_POSTS_TABLE).select(COMMUNITY_POST_SELECT).eq("id", id).maybeSingle();
+      if (res.error && (res.error as any)?.code !== "PGRST116") throw res.error;
+      return res.data ? normalizeCommunityPost(res.data) : null;
+    } catch (e) {
+      console.warn("community post lookup failed, using local storage", e);
+    }
+  }
+  const posts = await readLocalCommunityPosts();
+  return posts.find((post) => post.id === id) || null;
+}
+
+async function communityLikeHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post || post.status === "deleted") throw new Error("Community post not found.");
+
+    let liked = true;
+    let likesCount = 0;
+    if (supabase) {
+      try {
+        const existing = await supabase.from("community_likes").select("post_id,user_id").eq("post_id", postId).eq("user_id", user.id).maybeSingle();
+        if (existing.data) {
+          await supabase.from("community_likes").delete().eq("post_id", postId).eq("user_id", user.id);
+          liked = false;
+        } else {
+          const inserted = await supabase.from("community_likes").insert({ post_id: postId, user_id: user.id, user_email: user.email ?? null, created_at: new Date().toISOString() });
+          if (inserted.error) throw inserted.error;
+        }
+        const countRes = await supabase.from("community_likes").select("post_id", { count: "exact", head: true }).eq("post_id", postId);
+        likesCount = Number(countRes.count || 0);
+        await supabase.from(COMMUNITY_POSTS_TABLE).update({ likes_count: likesCount, updated_at: new Date().toISOString() }).eq("id", postId);
+        ok(reply, { success: true, liked, likes_count: likesCount });
+        return;
+      } catch (e) {
+        console.warn("community like supabase failed, using local storage", e);
+      }
+    }
+
+    const likes = await readLocalCommunityLikes();
+    const idx = likes.findIndex((row) => row.post_id === postId && row.user_id === user.id);
+    if (idx >= 0) {
+      likes.splice(idx, 1);
+      liked = false;
+    } else {
+      likes.push({ post_id: postId, user_id: user.id, user_email: user.email ?? null, created_at: new Date().toISOString() });
+    }
+    await writeLocalCommunityLikes(likes);
+    likesCount = likes.filter((row) => row.post_id === postId).length;
+    const posts = await readLocalCommunityPosts();
+    const postIdx = posts.findIndex((row) => row.id === postId);
+    if (postIdx >= 0) {
+      posts[postIdx].likes_count = likesCount;
+      posts[postIdx].updated_at = new Date().toISOString();
+      await writeLocalCommunityPosts(posts);
+    }
+    ok(reply, { success: true, liked, likes_count: likesCount });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function communityCommentsHandler(req: any, reply: any) {
+  try {
+    const user = await getAuthUser(req);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post || !communityPostVisibleToUser(post, user)) throw new Error("Community post not found.");
+    if (supabase) {
+      try {
+        const res = await supabase
+          .from("community_comments")
+          .select(COMMUNITY_COMMENT_SELECT)
+          .eq("post_id", postId)
+          .eq("status", "active")
+          .order("created_at", { ascending: true })
+          .limit(100);
+        if (res.error) throw res.error;
+        ok(reply, { success: true, comments: (res.data || []).map(normalizeCommunityComment) });
+        return;
+      } catch (e) {
+        console.warn("community comments supabase list failed, using local storage", e);
+      }
+    }
+    const rows = await readLocalCommunityComments();
+    ok(reply, { success: true, comments: rows.filter((row) => row.post_id === postId && row.status === "active") });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function createCommunityCommentHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const profile = await getProfileForUser(user).catch(() => null);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post || post.status === "deleted") throw new Error("Community post not found.");
+    const body = str((req.body as any)?.body, "").slice(0, 1000);
+    if (body.length < 2) throw new Error("Write a comment first.");
+    const now = new Date().toISOString();
+    const commentStatus = communityCommentStatusFor(post, body);
+    const row = normalizeCommunityComment({
+      id: crypto.randomUUID(),
+      post_id: postId,
+      user_id: user.id,
+      user_email: user.email ?? null,
+      author_name: str(profile?.full_name, "") || str(profile?.username, "") || str(user.email, "") || "OceanCore fisher",
+      body,
+      status: commentStatus,
+      created_at: now,
+      updated_at: now,
+    });
+
+    if (supabase) {
+      try {
+        const saved = await supabase.from("community_comments").insert(row).select(COMMUNITY_COMMENT_SELECT).single();
+        if (saved.error) throw saved.error;
+        const countRes = await supabase.from("community_comments").select("id", { count: "exact", head: true }).eq("post_id", postId).eq("status", "active");
+        await supabase.from(COMMUNITY_POSTS_TABLE).update({ comments_count: Number(countRes.count || 0), updated_at: now }).eq("id", postId);
+        ok(reply, {
+          success: true,
+          comment: normalizeCommunityComment(saved.data),
+          comments_count: Number(countRes.count || 0),
+          held_for_review: commentStatus !== "active",
+        });
+        return;
+      } catch (e) {
+        console.warn("community comment supabase insert failed, using local storage", e);
+      }
+    }
+
+    const rows = await readLocalCommunityComments();
+    rows.push(row);
+    await writeLocalCommunityComments(rows);
+    const commentsCount = rows.filter((x) => x.post_id === postId && x.status === "active").length;
+    const posts = await readLocalCommunityPosts();
+    const idx = posts.findIndex((x) => x.id === postId);
+    if (idx >= 0) {
+      posts[idx].comments_count = commentsCount;
+      posts[idx].updated_at = now;
+      await writeLocalCommunityPosts(posts);
+    }
+    ok(reply, { success: true, comment: row, comments_count: commentsCount, held_for_review: commentStatus !== "active" });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function reportCommunityPostHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post || post.status === "deleted") throw new Error("Community post not found.");
+    const now = new Date().toISOString();
+    const row = normalizeCommunityReport({
+      id: crypto.randomUUID(),
+      post_id: postId,
+      user_id: user.id,
+      user_email: user.email ?? null,
+      reason: str((req.body as any)?.reason, "report"),
+      notes: str((req.body as any)?.notes, ""),
+      status: "open",
+      created_at: now,
+      updated_at: now,
+    });
+    if (supabase) {
+      try {
+        const saved = await supabase.from("community_reports").insert(row).select(COMMUNITY_REPORT_SELECT).single();
+        if (saved.error) throw saved.error;
+        ok(reply, { success: true, report: normalizeCommunityReport(saved.data) });
+        return;
+      } catch (e) {
+        console.warn("community report supabase insert failed, using local storage", e);
+      }
+    }
+    const rows = await readLocalCommunityReports();
+    rows.push(row);
+    await writeLocalCommunityReports(rows);
+    ok(reply, { success: true, report: row });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function deleteCommunityPostHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post) throw new Error("Community post not found.");
+    if (post.user_id !== user.id && !isAdminUser(user)) throw adminError("You can only delete your own community posts.", 403);
+    const patch = { status: "deleted", updated_at: new Date().toISOString() };
+    if (supabase) {
+      try {
+        const saved = await supabase.from(COMMUNITY_POSTS_TABLE).update(patch).eq("id", postId).select(COMMUNITY_POST_SELECT).maybeSingle();
+        if (saved.error && (saved.error as any)?.code !== "PGRST116") throw saved.error;
+        ok(reply, { success: true, deleted: !!saved.data });
+        return;
+      } catch (e) {
+        console.warn("community delete supabase failed, using local storage", e);
+      }
+    }
+    const posts = await readLocalCommunityPosts();
+    const idx = posts.findIndex((row) => row.id === postId);
+    if (idx >= 0) {
+      posts[idx] = normalizeCommunityPost({ ...posts[idx], ...patch });
+      await writeLocalCommunityPosts(posts);
+    }
+    ok(reply, { success: true, deleted: idx >= 0 });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function adminCommunityPostsHandler(req: any, reply: any) {
+  try {
+    const admin = await requireAdminUser(req);
+    const result = await listCommunityPostsForUser(admin, "");
+    const reports = supabase
+      ? await supabase.from("community_reports").select(COMMUNITY_REPORT_SELECT).order("created_at", { ascending: false }).limit(200).then((r) => r.data || []).catch(() => [])
+      : await readLocalCommunityReports();
+    ok(reply, { success: true, admin: { id: admin.id, email: admin.email }, posts: result.posts.map((post) => withPublicCommunityMedia(req, post)), reports, storage: result.storage });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function adminUpdateCommunityPostHandler(req: any, reply: any) {
+  try {
+    const admin = await requireAdminUser(req);
+    const postId = str((req.params as any)?.id);
+    const status = str((req.body as any)?.status, "active").toLowerCase();
+    if (!["active", "hidden", "deleted"].includes(status)) throw new Error("Status must be active, hidden, or deleted.");
+    const patch = { status, updated_at: new Date().toISOString() };
+    if (supabase) {
+      const saved = await supabase.from(COMMUNITY_POSTS_TABLE).update(patch).eq("id", postId).select(COMMUNITY_POST_SELECT).maybeSingle();
+      if (saved.error && (saved.error as any)?.code !== "PGRST116") throw saved.error;
+      await writeAuditLog(admin, "community_post_status_updated", "community_post", postId, patch);
+      ok(reply, { success: true, post: saved.data ? normalizeCommunityPost(saved.data) : null });
+      return;
+    }
+    const posts = await readLocalCommunityPosts();
+    const idx = posts.findIndex((row) => row.id === postId);
+    if (idx >= 0) posts[idx] = normalizeCommunityPost({ ...posts[idx], ...patch });
+    await writeLocalCommunityPosts(posts);
+    await writeAuditLog(admin, "community_post_status_updated", "community_post", postId, patch);
+    ok(reply, { success: true, post: idx >= 0 ? posts[idx] : null });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+app.get("/community/posts", communityPostsHandler);
+app.get("/api/community/posts", communityPostsHandler);
+app.post("/community/posts", createCommunityPostHandler);
+app.post("/api/community/posts", createCommunityPostHandler);
+app.post("/community/posts/:id/like", communityLikeHandler);
+app.post("/api/community/posts/:id/like", communityLikeHandler);
+app.get("/community/posts/:id/comments", communityCommentsHandler);
+app.get("/api/community/posts/:id/comments", communityCommentsHandler);
+app.post("/community/posts/:id/comments", createCommunityCommentHandler);
+app.post("/api/community/posts/:id/comments", createCommunityCommentHandler);
+app.post("/community/posts/:id/report", reportCommunityPostHandler);
+app.post("/api/community/posts/:id/report", reportCommunityPostHandler);
+app.delete("/community/posts/:id", deleteCommunityPostHandler);
+app.delete("/api/community/posts/:id", deleteCommunityPostHandler);
+app.get("/admin/community/posts", adminCommunityPostsHandler);
+app.patch("/admin/community/posts/:id", adminUpdateCommunityPostHandler);
 
 app.post("/feedback", async (req, reply) => {
   try {
@@ -4220,7 +5088,6 @@ app.get("/admin/audit", async (req, reply) => {
 
 
 
-// Tactical Snapshot API routes removed for beta cleanup.
 
 // ============================================================
 // Boat AI catalogue + learning routes — merged from standalone Boat AI V15
@@ -4428,14 +5295,15 @@ function boatAiConditionFactor(inp: any) {
   if (inp.swell === '2.5+') f *= 1.30;
   if (inp.windAngle === 'against') f *= 1.12;
   if (inp.windAngle === 'side') f *= 1.06;
-  if (inp.tripType === 'bar') f *= 1.04;
+  if (inp.tripType === 'bar' || inp.barCrossing) f *= 1.04;
+  if (inp.nightRun) f *= 1.03;
   return clamp(f, 1, 1.75);
 }
 function boatAiReturnBias(inp: any) {
   let b = 0.05;
   if (inp.tripType === 'offshore') b += 0.03;
   if (inp.tripType === 'remote') b += 0.06;
-  if (inp.tripType === 'bar') b += 0.06;
+  if (inp.tripType === 'bar' || inp.barCrossing) b += 0.06;
   if (inp.wind === '10-20') b += 0.04;
   if (inp.wind === '20-25') b += 0.09;
   if (inp.wind === '25+') b += 0.16;
@@ -4445,6 +5313,18 @@ function boatAiReturnBias(inp: any) {
   if (inp.windAngle === 'against') b += 0.10;
   if (inp.windAngle === 'unknown') b += 0.05;
   return clamp(b, 0, 0.42);
+}
+function boatAiWindLimitValue(state: string) {
+  if (state === '25+') return 28;
+  if (state === '20-25') return 23;
+  if (state === '10-20') return 16;
+  return 8;
+}
+function boatAiSwellLimitValue(state: string) {
+  if (state === '2.5+') return 2.8;
+  if (state === '2-2.5') return 2.2;
+  if (state === '1-1.8') return 1.4;
+  return 0.8;
 }
 function boatAiCalculate(raw: any) {
   const inp = {
@@ -4456,8 +5336,21 @@ function boatAiCalculate(raw: any) {
     fuel: Number(raw?.fuel ?? raw?.fuel_onboard_l ?? 150),
     engine: String(raw?.engine || 'Engine'),
     hp: Number(raw?.hp ?? 150) * Math.max(1, Number(raw?.engineCount ?? raw?.engine_count ?? 1)),
+    baseHp: Number(raw?.baseHp ?? raw?.base_hp ?? raw?.hp ?? 150),
     engineCount: Math.max(1, Number(raw?.engineCount ?? raw?.engine_count ?? 1)),
     engineType: String(raw?.engineType || raw?.engine_type || '4-stroke'),
+    tankCapacity: Number(raw?.tankCapacity ?? raw?.tank_capacity_l ?? raw?.fuel ?? raw?.fuel_onboard_l ?? 150),
+    usableFuelPct: clamp(Number(raw?.usableFuelPct ?? raw?.usable_fuel_pct ?? 95), 50, 100),
+    burnCalibration: clamp(Number(raw?.burnCalibration ?? raw?.burn_calibration_percent ?? 100), 65, 145),
+    fuelPrice: Math.max(0, Number(raw?.fuelPrice ?? raw?.fuel_price ?? 0)),
+    crew: Math.max(0, Number(raw?.crew ?? 0)),
+    payload: Math.max(0, Number(raw?.payload ?? raw?.payload_kg ?? 0)),
+    skipperLevel: String(raw?.skipperLevel || raw?.skipper_level || 'intermediate'),
+    safetyGear: String(raw?.safetyGear || raw?.safety_gear || 'full'),
+    maxWindKn: Math.max(0, Number(raw?.maxWindKn ?? raw?.max_wind_kn ?? 20)),
+    maxSwellM: Math.max(0, Number(raw?.maxSwellM ?? raw?.max_swell_m ?? 1.8)),
+    barCrossing: raw?.barCrossing === true || raw?.bar_crossing === true || raw?.barCrossing === 'yes' || raw?.bar_crossing === 'yes',
+    nightRun: raw?.nightRun === true || raw?.night_run === true || raw?.nightRun === 'yes' || raw?.night_run === 'yes',
     speed: Number(raw?.speed ?? raw?.avg_speed_kn ?? 22),
     distance: Number(raw?.distance ?? raw?.distance_km ?? 0),
     extra: Number(raw?.extra ?? raw?.extra_km ?? 0),
@@ -4469,7 +5362,8 @@ function boatAiCalculate(raw: any) {
   };
   const speedKmh = Math.max(0.1, inp.speed * 1.852);
   const total = Math.max(0, inp.distance + inp.extra);
-  const ws = boatAiWeightSanity(inp.loa, inp.weight);
+  const planningWeight = inp.weight + (inp.crew * 85) + inp.payload;
+  const ws = boatAiWeightSanity(inp.loa, planningWeight);
   const wot = inp.hp * boatAiWotPerHp(inp.engineType);
   let flat = inp.hp * boatAiCruiseCoeff(inp.engineType) * Math.pow(Math.max(3, inp.speed) / 22, 1.85);
   if (inp.speed >= 9 && inp.speed < 18) flat *= 1 + (18 - inp.speed) * 0.055;
@@ -4477,6 +5371,7 @@ function boatAiCalculate(raw: any) {
   const expectedKg = Math.max(650, inp.loa * 230);
   flat *= boatAiHullFactor(inp.hullType) * clamp(Math.pow(ws.kg / expectedKg, 0.28), 0.88, 1.18) * clamp(1 + ((inp.loa - 5.8) * 0.018), 0.94, 1.08);
   flat = clamp(flat, wot * 0.16, wot * 0.76);
+  flat *= clamp(inp.burnCalibration / 100, 0.65, 1.45);
   const cond = boatAiConditionFactor(inp);
   const base = flat * cond;
   const rb = boatAiReturnBias(inp);
@@ -4485,19 +5380,35 @@ function boatAiCalculate(raw: any) {
   const tripFuel = outFuel + homeFuel;
   const hours = total / speedKmh;
   const avg = hours ? tripFuel / hours : 0;
-  const reserveL = inp.fuel * (inp.reserve / 100);
-  const spare = inp.fuel - tripFuel - reserveL;
-  const usable = Math.max(0, inp.fuel - reserveL);
+  const usableFuel = Math.min(Math.max(0, inp.fuel), Math.max(0, inp.tankCapacity || inp.fuel)) * inp.usableFuelPct / 100;
+  const reserveL = usableFuel * (inp.reserve / 100);
+  const spare = usableFuel - tripFuel - reserveL;
+  const usable = Math.max(0, usableFuel - reserveL);
   const range = avg ? usable / avg * speedKmh : 0;
+  const loadPct = wot ? avg / wot : 0;
+  const fuelCost = tripFuel * inp.fuelPrice;
+  const windMax = boatAiWindLimitValue(inp.wind);
+  const swellMax = boatAiSwellLimitValue(inp.swell);
+  const windOverLimit = inp.maxWindKn > 0 && windMax > inp.maxWindKn;
+  const swellOverLimit = inp.maxSwellM > 0 && swellMax > inp.maxSwellM;
   let risk = 0;
   if (inp.wind !== '0-10') risk++;
   if (inp.swell !== 'below-1') risk++;
   if (inp.windAngle === 'unknown' || inp.windAngle === 'against') risk++;
   if (inp.tripType === 'bar' || inp.tripType === 'remote' || inp.tripType === 'offshore') risk++;
-  const sparePct = inp.fuel ? (spare / inp.fuel) * 100 : 0;
+  if (inp.barCrossing) risk++;
+  if (inp.nightRun) risk++;
+  if (inp.safetyGear === 'partial') risk++;
+  if (inp.safetyGear === 'minimal') risk += 2;
+  if (inp.skipperLevel === 'learner') risk++;
+  const sparePct = usableFuel ? (spare / usableFuel) * 100 : 0;
   let decision = 'GO', reason = 'Fuel buffer looks healthy for this plan.';
-  if (spare < 0 || range < total || inp.wind === '25+' || inp.swell === '2.5+') {
-    decision = 'NO GO'; reason = spare < 0 ? `Short by ${Math.abs(spare).toFixed(0)}L after reserve.` : 'Conditions/range fail.';
+  if (spare < 0 || range < total || inp.wind === '25+' || inp.swell === '2.5+' || windOverLimit || swellOverLimit || inp.safetyGear === 'minimal') {
+    decision = 'NO GO';
+    if (spare < 0) reason = `Short by ${Math.abs(spare).toFixed(0)}L after reserve.`;
+    else if (windOverLimit || swellOverLimit) reason = 'Conditions exceed your Boat AI safety settings.';
+    else if (inp.safetyGear === 'minimal') reason = 'Safety gear is marked minimal. Fix that before relying on this trip plan.';
+    else reason = 'Conditions/range fail.';
   } else if (inp.tripType !== 'inshore' && sparePct < 10) {
     decision = 'CAUTION'; reason = 'Offshore margin is thin. Trip works on paper, but protect fuel.';
   } else if (risk >= 3 || sparePct < 22) {
@@ -4508,9 +5419,12 @@ function boatAiCalculate(raw: any) {
   if (inp.windAngle === 'unknown') confidence -= 7;
   if (sparePct < 15) confidence -= 10;
   if (ws.msg) confidence -= 5;
-  if (wot && avg / wot > 0.62) confidence -= 8;
+  if (loadPct > 0.62) confidence -= 8;
+  if (inp.skipperLevel === 'learner') confidence -= 5;
+  if (inp.safetyGear === 'partial') confidence -= 8;
+  if (inp.nightRun) confidence -= 6;
   confidence = clamp(confidence, 45, 96);
-  return { success: true, input: inp, weight_sanity: ws, flat_burn_lph: round2(flat), condition_factor: round2(cond), average_burn_lph: round2(avg), trip_fuel_l: round2(tripFuel), reserve_l: round2(reserveL), spare_l: round2(spare), safe_range_km: round2(range), out_fuel_l: round2(outFuel), return_fuel_l: round2(homeFuel), return_bias_percent: Math.round(rb * 100), decision, reason, confidence: Math.round(confidence), wot_lph: round2(wot) };
+  return { success: true, input: inp, planning_weight_kg: round2(planningWeight), weight_sanity: ws, flat_burn_lph: round2(flat), condition_factor: round2(cond), average_burn_lph: round2(avg), trip_fuel_l: round2(tripFuel), reserve_l: round2(reserveL), spare_l: round2(spare), spare_percent: round2(sparePct), safe_range_km: round2(range), usable_fuel_l: round2(usableFuel), out_fuel_l: round2(outFuel), return_fuel_l: round2(homeFuel), return_bias_percent: Math.round(rb * 100), fuel_cost: round2(fuelCost), wind_over_limit: windOverLimit, swell_over_limit: swellOverLimit, decision, reason, confidence: Math.round(confidence), wot_lph: round2(wot), load_percent: round2(loadPct * 100) };
 }
 
 app.post('/api/boat/calculate', async (req, reply) => {
@@ -4543,7 +5457,13 @@ app.get("/__debug/routes", async (_req, reply) => {
     build_id: BUILD_ID,
     routes: [
       "/health",
+      "/app/",
+      "/legal",
       "/legal/docs",
+      "/legal/terms-of-service",
+      "/legal/privacy-policy",
+      "/legal/account-deletion",
+      "/legal/marine-disclaimer",
       "/auth/login",
       "/auth/signup",
       "/auth/refresh",
@@ -4553,12 +5473,18 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/auth/magic-link",
       "/auth/update-password",
       "/auth/profile",
+      "/auth/settings",
+      "/auth/avatar",
+      "/auth/email",
+      "/auth/export-data",
+      "/auth/account",
       "/auth/legal-status",
       "/auth/accept-legal",
       "/catches",
       "/catches/photo",
       "/catches/with-photo",
       "/api/stats",
+      "/api/geocode/search",
       "/places/ramps",
       "/places/fuel",
       "/marine/forecast",
@@ -4578,6 +5504,18 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/admin/feedback",
       "/admin/audit",
       "/saved-areas",
+      "/community/posts",
+      "/api/community/posts",
+      "/community/posts/:id/like",
+      "/api/community/posts/:id/like",
+      "/community/posts/:id/comments",
+      "/api/community/posts/:id/comments",
+      "/community/posts/:id/report",
+      "/api/community/posts/:id/report",
+      "/community/posts/:id",
+      "/api/community/posts/:id",
+      "/admin/community/posts",
+      "/admin/community/posts/:id",
       "/api/boat/catalog/boats",
       "/api/boat/catalog/outboards",
       "/api/boat/trip-log",
