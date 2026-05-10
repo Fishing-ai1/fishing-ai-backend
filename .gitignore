@@ -4,10 +4,10 @@ build/
 .cache/
 .env
 .env.*
+.env.local
+uploads/
+data/
+*.log
 .DS_Store
 npm-debug.log*
 pnpm-lock.yaml
-
-.env
-.env.local
-

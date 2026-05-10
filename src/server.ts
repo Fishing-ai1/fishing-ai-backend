@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-05-02_V16_BOAT_AI_MERGED";
+const BUILD_ID = "OC_BACKEND_2026-05-10_BETA_NO_SATELLITE_NO_TACTICAL";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -2997,130 +2997,7 @@ app.get("/api/ripstyle/snapshot", async (req, reply) => {
   }
 });
 
-app.get("/api/satellite-intel/targets", async (_req, reply) => {
-  ok(reply, {
-    success: true,
-    targets: Object.entries(SATELLITE_TARGETS).map(([key, value]) => ({ key, ...value })),
-  });
-});
-
-app.get("/api/satellite-intel/layers", async (_req, reply) => {
-  ok(reply, {
-    success: true,
-    layers: [
-      { key: "sst", label: "Sea Surface Temp raster", source: "NASA GIBS / Worldview public WMTS (no key required)" },
-      { key: "chlorophyll", label: "Chlorophyll / bait raster", source: "NASA GIBS / OceanColor visual layer (no key required)" },
-      { key: "score", label: "OceanCore species score", source: "Windy + OceanCore species model" },
-      { key: "sst_score", label: "SST + OceanCore score", source: "NASA GIBS + OceanCore" },
-      { key: "chl_score", label: "Chlorophyll + OceanCore score", source: "NASA GIBS + OceanCore" },
-    ],
-  });
-});
-
-
-app.get("/api/satellite-intel/sources", async (_req, reply) => {
-  ok(reply, {
-    success: true,
-    visual_tiles: {
-      nasa_gibs: true,
-      requires_key: false,
-      note: "NASA GIBS/Worldview-style WMTS tiles are used in the frontend for SST, chlorophyll and true-colour visual layers."
-    },
-    numeric_data: {
-      sst: { configured: !!NOAA_MUR_SST_ERDDAP_BASE, source: "NOAA CoastWatch ERDDAP MUR SST", variable: NOAA_MUR_SST_VARIABLE },
-      chlorophyll: { configured: !!NOAA_CHL_ERDDAP_BASE, source: "NOAA/NASA OceanColor ERDDAP", variable: NOAA_CHL_VARIABLE },
-      currents: { configured: !!COPERNICUS_CURRENT_ENDPOINT, source: "Copernicus/current provider endpoint" },
-      depth: { configured: !!GEBCO_DEPTH_ENDPOINT, source: "GEBCO/depth provider endpoint" },
-      earthdata_token_configured: !!EARTHDATA_BEARER_TOKEN
-    },
-    windy: {
-      configured: !!WINDY_POINT_FORECAST_KEY,
-      key_source: WINDY_KEY_SOURCE
-    }
-  });
-});
-
-app.get("/api/satellite-intel/report", async (req, reply) => {
-  try {
-    const lat = num((req.query as any)?.lat);
-    const lng = num((req.query as any)?.lng);
-    const radiusKm = clamp(Number((req.query as any)?.radius_km || 120), 20, 220);
-    const speciesKey = normalizeTargetSpecies((req.query as any)?.species);
-    const layer = str((req.query as any)?.layer, "sst_score");
-    if (lat == null || lng == null) {
-      reply.code(400).send({ success: false, error: "lat and lng are required" });
-      return;
-    }
-    const cells = await buildSatelliteIntelGrid({ lat, lng, radiusKm, speciesKey, layer });
-    const summary = summarizeSatelliteCells(cells);
-    const plan = buildSatellitePlan(speciesKey, cells);
-    const target = SATELLITE_TARGETS[speciesKey] || SATELLITE_TARGETS.black_marlin;
-    const svg = generateSatelliteReportSvg({ lat, lng, radiusKm, speciesKey, layer, cells, summary, confidence: plan.confidence });
-    const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`;
-    ok(reply, {
-      success: true,
-      source: "OceanCore Satellite Report Map V27",
-      target_species: speciesKey,
-      target_species_label: target.label,
-      layer,
-      layer_label: layer.includes("chl") ? "Chlorophyll + fronts + weather" : layer.includes("sst") ? "SST + fronts + weather" : "OceanCore score",
-      location: { lat, lng },
-      radius_km: radiusKm,
-      bounds: satelliteCellBounds(cells),
-      heatmap: { style: "continuous_canvas_overlay", rows: Math.round(Math.sqrt(cells.length)), cols: Math.round(Math.sqrt(cells.length)), colour_ramp: "purple-magenta-orange-yellow" },
-      summary,
-      confidence: plan.confidence,
-      date_label: new Date().toISOString().slice(0, 10),
-      report_svg: svg,
-      report_data_url: dataUrl,
-    });
-  } catch (e) {
-    fail(reply, e);
-  }
-});
-
-app.get("/api/satellite-intel/scan", async (req, reply) => {
-  try {
-    const lat = num((req.query as any)?.lat);
-    const lng = num((req.query as any)?.lng);
-    const radiusKm = clamp(Number((req.query as any)?.radius_km || 120), 20, 220);
-    const speciesKey = normalizeTargetSpecies((req.query as any)?.species);
-    const layer = str((req.query as any)?.layer, "sst_score");
-
-    if (lat == null || lng == null) {
-      reply.code(400).send({ success: false, error: "lat and lng are required" });
-      return;
-    }
-
-    const cells = await buildSatelliteIntelGrid({ lat, lng, radiusKm, speciesKey, layer });
-    const summary = summarizeSatelliteCells(cells);
-    const insights = buildSatelliteInsights(speciesKey, layer, cells);
-    const plan = buildSatellitePlan(speciesKey, cells);
-    const target = SATELLITE_TARGETS[speciesKey] || SATELLITE_TARGETS.black_marlin;
-
-    ok(reply, {
-      success: true,
-      source: "OceanCore Satellite Intel V27 Clean Rip Heat Fronts",
-      source_note: "V27 draws a cleaner transparent Rip-style offshore heat/front surface from the dense OceanCore scan grid. Live anchors use Windy plus NOAA MUR SST when reachable; chlorophyll/current/depth join when provider env vars are set.",
-      target_species: speciesKey,
-      target_species_label: target.label,
-      target_group: target.group,
-      layer,
-      location: { lat, lng },
-      radius_km: radiusKm,
-      bounds: satelliteCellBounds(cells),
-      heatmap: { style: "continuous_canvas_overlay", rows: Math.round(Math.sqrt(cells.length)), cols: Math.round(Math.sqrt(cells.length)), colour_ramp: "purple-magenta-orange-yellow" },
-      summary,
-      confidence: plan.confidence,
-      cells,
-      insights,
-      plan,
-    });
-  } catch (e) {
-    fail(reply, e);
-  }
-});
-
+// Satellite Intel API routes removed for beta cleanup.
 app.get("/marine/forecast", marineHandler);
 app.get("/api/marine/forecast", marineHandler);
 app.get("/weather/marine", marineHandler);
@@ -4343,21 +4220,7 @@ app.get("/admin/audit", async (req, reply) => {
 
 
 
-app.post("/api/tactical/snapshot", async (req, reply) => {
-  try { const user = await getRequiredAuthUser(req); const body = (req.body || {}) as TacticalSnapshotPayload; const built = await buildTacticalSnapshot(user, body); const snapshot = await saveTacticalSnapshot(user, built.snapshot, body); ok(reply, { success: true, snapshot }); }
-  catch (e: any) { fail(reply, e, e?.statusCode || 500); }
-});
-
-app.post("/ai/tactical/snapshot", async (req, reply) => {
-  try { const user = await getRequiredAuthUser(req); const body = (req.body || {}) as TacticalSnapshotPayload; const built = await buildTacticalSnapshot(user, body); const snapshot = await saveTacticalSnapshot(user, built.snapshot, body); ok(reply, { success: true, snapshot }); }
-  catch (e: any) { fail(reply, e, e?.statusCode || 500); }
-});
-
-app.get("/api/tactical/snapshots", async (req, reply) => {
-  try { const user = await getRequiredAuthUser(req); if (!supabase || user.isGuest) { ok(reply, { success: true, snapshots: [] }); return; } const res = await supabase.from(TACTICAL_SNAPSHOTS_TABLE).select("id,user_id,saved_area_id,area_name,lat,lng,radius_km,signal,confidence,headline,snapshot_json,created_at").eq("user_id", user.id).order("created_at", { ascending: false }).limit(10); if (res.error) throw res.error; ok(reply, { success: true, snapshots: res.data || [] }); }
-  catch (e: any) { fail(reply, e, e?.statusCode || 500); }
-});
-
+// Tactical Snapshot API routes removed for beta cleanup.
 
 // ============================================================
 // Boat AI catalogue + learning routes — merged from standalone Boat AI V15
@@ -4699,9 +4562,6 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/places/ramps",
       "/places/fuel",
       "/marine/forecast",
-      "/api/satellite-intel/scan",
-      "/api/satellite-intel/targets",
-      "/api/satellite-intel/layers",
       "/ai/species-detect",
       "/api/ai/species-detect",
       "/species-detect",
@@ -4718,8 +4578,6 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/admin/feedback",
       "/admin/audit",
       "/saved-areas",
-      "/api/tactical/snapshot",
-      "/api/tactical/snapshots",
       "/api/boat/catalog/boats",
       "/api/boat/catalog/outboards",
       "/api/boat/trip-log",
