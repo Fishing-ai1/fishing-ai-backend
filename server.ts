@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-05-20_BETA_CORE_CLEANUP";
+const BUILD_ID = "OC_BACKEND_2026-05-24_WEB_ORIGIN_ALLOWLIST";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -85,6 +85,9 @@ const STRIPE_PRICE_PRO_YEARLY = process.env.STRIPE_PRICE_PRO_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
 const FRONTEND_DIR = process.env.FRONTEND_DIR || path.resolve(process.cwd(), "../fishing-ai-frontend");
 const ALLOWED_ORIGINS = csvEnv(process.env.ALLOWED_ORIGINS || FRONTEND_URL || "");
+const DEFAULT_WEB_ORIGINS = csvEnv(
+  process.env.DEFAULT_WEB_ORIGINS || "https://oceancore-frontend.vercel.app"
+);
 const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const TRUST_PROXY = String(process.env.TRUST_PROXY || (IS_PRODUCTION ? "true" : "false")).toLowerCase() !== "false";
 const SECURITY_HEADERS_ENABLED = String(process.env.SECURITY_HEADERS || "true").toLowerCase() !== "false";
@@ -105,7 +108,9 @@ const DEFAULT_NATIVE_APP_ORIGINS = [
 const NATIVE_APP_ORIGINS = csvEnv(
   process.env.NATIVE_APP_ORIGINS || DEFAULT_NATIVE_APP_ORIGINS
 );
-const EFFECTIVE_ALLOWED_ORIGINS = Array.from(new Set([...ALLOWED_ORIGINS, ...NATIVE_APP_ORIGINS]));
+const EFFECTIVE_ALLOWED_ORIGINS = Array.from(
+  new Set([...DEFAULT_WEB_ORIGINS, ...ALLOWED_ORIGINS, ...NATIVE_APP_ORIGINS])
+);
 const ALLOW_NULL_ORIGIN = String(process.env.ALLOW_NULL_ORIGIN || "").toLowerCase() === "true";
 // During beta, admin can manually assign starter/basic/pro/founder without Stripe being active.
 const BETA_MANUAL_PLAN_ACCESS = String(process.env.BETA_MANUAL_PLAN_ACCESS || "true").toLowerCase() !== "false";
