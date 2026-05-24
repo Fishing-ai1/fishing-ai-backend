@@ -591,7 +591,7 @@ const app = Fastify({
 function isAllowedOrigin(origin: string | undefined) {
   const value = normalizeOriginValue(origin || "");
   if (!value) return true;
-  if (value === "null") return ALLOW_NULL_ORIGIN || !IS_PRODUCTION;
+  if (value === "null") return ALLOW_NULL_ORIGIN || EFFECTIVE_ALLOWED_ORIGINS.includes("null") || !IS_PRODUCTION;
   if (EFFECTIVE_ALLOWED_ORIGINS.length) return EFFECTIVE_ALLOWED_ORIGINS.includes(value);
   if (!IS_PRODUCTION) return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(value);
   return false;
@@ -2531,7 +2531,7 @@ app.get("/health", async (_req, reply) => {
     body_limit_bytes: BODY_LIMIT_BYTES,
     allowed_origin_count: EFFECTIVE_ALLOWED_ORIGINS.length,
     native_app_origins: NATIVE_APP_ORIGINS,
-    file_origin_allowed: ALLOW_NULL_ORIGIN || !IS_PRODUCTION,
+    file_origin_allowed: ALLOW_NULL_ORIGIN || EFFECTIVE_ALLOWED_ORIGINS.includes("null") || !IS_PRODUCTION,
     upload_limits: {
       avatar_image_max_bytes: AVATAR_IMAGE_MAX_BYTES,
       catch_photo_max_bytes: CATCH_PHOTO_MAX_BYTES,
