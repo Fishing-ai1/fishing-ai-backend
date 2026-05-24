@@ -92,10 +92,21 @@ const RATE_LIMITS_ENABLED = String(process.env.RATE_LIMITS || "true").toLowerCas
 const GEOCODE_SEARCH_URL = envValue("GEOCODE_SEARCH_URL") || "https://nominatim.openstreetmap.org/search";
 const GEOCODE_COUNTRYCODES = envValue("GEOCODE_COUNTRYCODES");
 const BODY_LIMIT_BYTES = Number(process.env.BODY_LIMIT_BYTES || 60 * 1024 * 1024);
+const DEFAULT_NATIVE_APP_ORIGINS = [
+  "capacitor://localhost",
+  "ionic://localhost",
+  "http://localhost",
+  "https://localhost",
+  "http://localhost:4000",
+  "http://127.0.0.1:4000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+].join(",");
 const NATIVE_APP_ORIGINS = csvEnv(
-  process.env.NATIVE_APP_ORIGINS || "capacitor://localhost,ionic://localhost,http://localhost,https://localhost"
+  process.env.NATIVE_APP_ORIGINS || DEFAULT_NATIVE_APP_ORIGINS
 );
 const EFFECTIVE_ALLOWED_ORIGINS = Array.from(new Set([...ALLOWED_ORIGINS, ...NATIVE_APP_ORIGINS]));
+const ALLOW_NULL_ORIGIN = String(process.env.ALLOW_NULL_ORIGIN || "").toLowerCase() === "true";
 // During beta, admin can manually assign starter/basic/pro/founder without Stripe being active.
 const BETA_MANUAL_PLAN_ACCESS = String(process.env.BETA_MANUAL_PLAN_ACCESS || "true").toLowerCase() !== "false";
 
@@ -580,7 +591,7 @@ const app = Fastify({
 function isAllowedOrigin(origin: string | undefined) {
   const value = normalizeOriginValue(origin || "");
   if (!value) return true;
-  if (value === "null") return !IS_PRODUCTION;
+  if (value === "null") return ALLOW_NULL_ORIGIN || !IS_PRODUCTION;
   if (EFFECTIVE_ALLOWED_ORIGINS.length) return EFFECTIVE_ALLOWED_ORIGINS.includes(value);
   if (!IS_PRODUCTION) return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(value);
   return false;
@@ -2520,6 +2531,7 @@ app.get("/health", async (_req, reply) => {
     body_limit_bytes: BODY_LIMIT_BYTES,
     allowed_origin_count: EFFECTIVE_ALLOWED_ORIGINS.length,
     native_app_origins: NATIVE_APP_ORIGINS,
+    file_origin_allowed: ALLOW_NULL_ORIGIN || !IS_PRODUCTION,
     upload_limits: {
       avatar_image_max_bytes: AVATAR_IMAGE_MAX_BYTES,
       catch_photo_max_bytes: CATCH_PHOTO_MAX_BYTES,
