@@ -12,6 +12,7 @@ const dataFiles = [
   "community-comments.json",
   "community-reports.json",
   "community-likes.json",
+  "reward-ledger.json",
 ];
 
 function ok(message) {
@@ -105,6 +106,9 @@ async function checkFrontendIntegrity() {
     "data-legal-url",
     "btnOpenAccountDeletionPage",
     "/legal/account-deletion",
+    "section-rewards",
+    "loadRewards",
+    "/rewards/reconcile",
   ]) {
     if (!html.includes(token)) fail(`frontend missing audit token: ${token}`);
   }
@@ -155,6 +159,9 @@ async function checkSchemaIntegrity() {
     "catches add column if not exists privacy",
     "community_likes add column if not exists user_email",
     "community_reports add column if not exists notes",
+    "create table if not exists public.reward_ledger",
+    "unique(user_id, event_key)",
+    "reward ledger own reads",
   ]) {
     if (!schema.includes(token)) fail(`schema missing ${token}`);
   }
@@ -237,6 +244,14 @@ async function restoreLocalDataFiles(snapshot) {
   }
 }
 
+async function clearLocalDataFiles() {
+  const dataDir = path.join(backendRoot, "data");
+  await fs.mkdir(dataDir, { recursive: true });
+  for (const file of dataFiles) {
+    await fs.rm(path.join(dataDir, file), { force: true });
+  }
+}
+
 function stopPort(port) {
   if (process.platform !== "win32") return;
   spawnSync("powershell.exe", [
@@ -264,6 +279,7 @@ async function runTemporaryMemoryBackend(fn) {
   const snapshot = await snapshotLocalDataFiles();
   const baseUrl = `http://127.0.0.1:${TEMP_PORT}`;
   stopPort(TEMP_PORT);
+  await clearLocalDataFiles();
 
   const tsxCli = path.join(backendRoot, "node_modules", "tsx", "dist", "cli.mjs");
   const command = process.execPath;
@@ -394,6 +410,61 @@ async function checkCommunityModeration(baseUrl) {
   }
 }
 
+async function checkRewardsMath(baseUrl) {
+  const before = await request(baseUrl, "/rewards/me");
+  const createdCatch = await request(baseUrl, "/catches", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      species: "Rewards Audit Snapper",
+      species_confirmed: true,
+      notes: "Automated rewards audit.",
+    }),
+  });
+  const catchPoints = (createdCatch.rewards || [])
+    .filter((row) => row.awarded)
+    .reduce((sum, row) => sum + Number(row.points || 0), 0);
+  if (catchPoints !== 15) fail(`expected catch rewards of 15, got ${catchPoints}`);
+
+  const post = await request(baseUrl, "/community/posts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      species: "Trip report",
+      caption: "Trip report automated rewards audit.",
+      general_area: "Audit area",
+      privacy: "public",
+    }),
+  });
+  const postPoints = (post.rewards || [])
+    .filter((row) => row.awarded)
+    .reduce((sum, row) => sum + Number(row.points || 0), 0);
+  if (postPoints !== 22) fail(`expected trip-report rewards of 22, got ${postPoints}`);
+
+  const comment = await request(baseUrl, `/community/posts/${post.post.id}/comments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body: "Useful rewards audit comment." }),
+  });
+  const commentPoints = (comment.rewards || [])
+    .filter((row) => row.awarded)
+    .reduce((sum, row) => sum + Number(row.points || 0), 0);
+  if (commentPoints !== 1) fail(`expected comment rewards of 1, got ${commentPoints}`);
+
+  const after = await request(baseUrl, "/rewards/me");
+  const delta = Number(after.balance || 0) - Number(before.balance || 0);
+  if (delta !== 38) fail(`expected total reward delta of 38, got ${delta}`);
+
+  const reconciled = await request(baseUrl, "/rewards/reconcile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (Number(reconciled.awarded_points || 0) !== 0) {
+    fail(`reward reconciliation duplicated points: ${reconciled.awarded_points}`);
+  }
+}
+
 await check("frontend integrity", checkFrontendIntegrity);
 await check("frontend/backend route integrity", checkRouteIntegrity);
 await check("Supabase schema integrity", checkSchemaIntegrity);
@@ -403,6 +474,9 @@ await check("catch privacy on disposable backend", () =>
 );
 await check("community moderation on disposable backend", () =>
   runTemporaryMemoryBackend((baseUrl) => checkCommunityModeration(baseUrl))
+);
+await check("OceanPoints math and duplicate prevention", () =>
+  runTemporaryMemoryBackend((baseUrl) => checkRewardsMath(baseUrl))
 );
 
 if (process.exitCode) {

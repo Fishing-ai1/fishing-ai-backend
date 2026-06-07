@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-05-24_WEB_ORIGIN_ALLOWLIST";
+const BUILD_ID = "OC_BACKEND_2026-06-07_REWARDS_PHASE_1";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -67,6 +67,7 @@ const USAGE_TABLE = process.env.USAGE_TABLE || "usage_daily";
 const SAVED_AREAS_TABLE = process.env.SAVED_AREAS_TABLE || "saved_areas";
 const COMMUNITY_POSTS_TABLE = process.env.COMMUNITY_POSTS_TABLE || "community_posts";
 const ACCOUNT_SETTINGS_TABLE = process.env.ACCOUNT_SETTINGS_TABLE || "account_settings";
+const REWARD_LEDGER_TABLE = process.env.REWARD_LEDGER_TABLE || "reward_ledger";
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4.1-mini";
 const AI_CHAT_SESSIONS_TABLE = process.env.AI_CHAT_SESSIONS_TABLE || "ai_chat_sessions";
 const AI_CHAT_MESSAGES_TABLE = process.env.AI_CHAT_MESSAGES_TABLE || "ai_chat_messages";
@@ -130,7 +131,7 @@ const DEV_GUEST_USER_ID =
   process.env.DEV_GUEST_USER_ID || "00000000-0000-0000-0000-000000000000";
 const DEV_GUEST_EMAIL = process.env.DEV_GUEST_EMAIL || "guest@oceancore.local";
 
-const LEGAL_VERSION = "2026-04-05-slim-beta-1";
+const LEGAL_VERSION = "2026-06-07-rewards-beta-1";
 const LEGAL_CONTACT_EMAIL = "support@oceancore.ai";
 
 const LEGAL_DOCS = {
@@ -148,6 +149,10 @@ You keep ownership of the content you upload, and you give OceanCore AI permissi
 
 Community posts must avoid exposing another person's private information, exact fishing marks without permission, unsafe instructions, harassment, spam, or illegal activity.
 
+OceanPoints are promotional loyalty points used to recognise eligible contributions. They have no cash value, are not property or currency, and cannot currently be transferred or redeemed. Earning rules, levels, availability, and future rewards may change. Points gained through spam, duplicate, misleading, unsafe, manipulated, or fraudulent activity may be withheld, reversed, or removed.
+
+Future vouchers, giveaways, creator payments, sponsorships, and partner benefits are not available unless OceanCore publishes specific terms and confirms that program as active. Creator status or content performance does not guarantee payment.
+
 You may request export or deletion of your account data from Account & Settings where supported by the app.
 
 To the maximum extent permitted by law, OceanCore AI is not liable for indirect or consequential loss arising from beta use.
@@ -155,9 +160,9 @@ To the maximum extent permitted by law, OceanCore AI is not liable for indirect 
 Contact: ${LEGAL_CONTACT_EMAIL}`,
   privacy: `OceanCore AI Beta Privacy Policy
 
-We may collect account details, profile details, catch logs, saved areas, boat details, notes, photos, videos, AI prompts, AI responses, feedback, device/browser diagnostics, and location information you choose to provide.
+We may collect account details, profile details, catch logs, saved areas, boat details, notes, photos, videos, AI prompts, AI responses, feedback, reward activity, OceanPoints balances, contribution-quality signals, device/browser diagnostics, and location information you choose to provide.
 
-We use this data to run the product, support account sync, personalize AI answers, display marine planning context, process uploads, troubleshoot issues, provide support, improve safety and moderation, and protect the service.
+We use this data to run the product, support account sync, personalize AI answers, display marine planning context, process uploads, calculate eligible OceanPoints, detect duplicate or abusive reward activity, troubleshoot issues, provide support, improve safety and moderation, and protect the service.
 
 We do not sell your personal information. We may use service providers such as hosting, database, storage, AI, payments, email, and diagnostics providers to operate OceanCore AI.
 
@@ -176,7 +181,7 @@ You can export supported account data from Account & Settings > Account, Data & 
 
 You can delete your account from Account & Settings > Account, Data & Deletion by typing DELETE and choosing Delete Account.
 
-Account deletion removes your profile, account settings, catch logs, saved areas, feedback, AI chat history, AI memory, community likes, community reports, and the authentication account where supported by the backend.
+Account deletion removes your profile, account settings, catch logs, saved areas, feedback, AI chat history, AI memory, OceanPoints ledger, community likes, community reports, and the authentication account where supported by the backend.
 
 Community posts are marked deleted rather than kept public. Community comments may be hidden. This protects discussion integrity while removing your active identity from public surfaces.
 
@@ -398,6 +403,21 @@ type AccountSettingsRow = {
   updated_at?: string | null;
 };
 
+type RewardLedgerRow = {
+  id: string;
+  user_id: string;
+  user_email?: string | null;
+  event_type: string;
+  event_key: string;
+  points: number;
+  title: string;
+  source_type?: string | null;
+  source_id?: string | null;
+  metadata?: Record<string, any>;
+  status?: string | null;
+  created_at: string;
+};
+
 const supabase: SupabaseClient | null =
   SUPABASE_URL && SUPABASE_SERVICE_KEY
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -567,6 +587,7 @@ const COMMUNITY_POSTS_FILE = path.join(DATA_DIR, "community-posts.json");
 const COMMUNITY_COMMENTS_FILE = path.join(DATA_DIR, "community-comments.json");
 const COMMUNITY_REPORTS_FILE = path.join(DATA_DIR, "community-reports.json");
 const COMMUNITY_LIKES_FILE = path.join(DATA_DIR, "community-likes.json");
+const REWARD_LEDGER_FILE = path.join(DATA_DIR, "reward-ledger.json");
 const AVATAR_IMAGE_MAX_BYTES = Number(process.env.AVATAR_IMAGE_MAX_BYTES || 5 * 1024 * 1024);
 const CATCH_PHOTO_MAX_BYTES = Number(process.env.CATCH_PHOTO_MAX_BYTES || 12 * 1024 * 1024);
 const COMMUNITY_MEDIA_MAX_BYTES = Number(process.env.COMMUNITY_MEDIA_MAX_BYTES || 35 * 1024 * 1024);
@@ -714,6 +735,7 @@ const mem = {
   communityReports: [] as CommunityReportRow[],
   communityLikes: [] as { post_id: string; user_id: string; user_email?: string | null; created_at: string }[],
   accountSettings: new Map<string, AccountSettingsRow>(),
+  rewardLedger: [] as RewardLedgerRow[],
 };
 
 function ok<T>(reply: any, body: T) {
@@ -956,6 +978,15 @@ function normalizeProfile(row: any = {}) {
     created_at: row.created_at ?? null,
     updated_at: row.updated_at ?? null,
   };
+}
+
+function hasCurrentLegalAcceptance(profile: ProfileRow | null | undefined) {
+  return !!(
+    profile?.accepted_terms_at &&
+    profile?.accepted_privacy_at &&
+    profile?.accepted_disclaimer_at &&
+    profile?.legal_version === LEGAL_VERSION
+  );
 }
 
 async function getProfileForUser(user: AuthUser): Promise<ProfileRow> {
@@ -1367,6 +1398,294 @@ function summarizeCatchStats(rows: CatchRow[]) {
     latest_catch: latest,
     top_species: rankedSpecies,
     legal_ratio_percent: legalRatio,
+  };
+}
+
+const REWARD_RULES = {
+  catch_submitted: { points: 10, title: "Catch logged", dailyLimit: 10 },
+  catch_photo_uploaded: { points: 5, title: "Catch photo added", dailyLimit: 10 },
+  species_confirmed: { points: 5, title: "Species confirmed", dailyLimit: 10 },
+  community_post_created: { points: 2, title: "Community post created", dailyLimit: 5 },
+  community_comment_created: { points: 1, title: "Community comment added", dailyLimit: 20 },
+  trip_report_created: { points: 20, title: "Trip report shared", dailyLimit: 3 },
+  weather_report_created: { points: 5, title: "Weather report shared", dailyLimit: 3 },
+  water_report_created: { points: 5, title: "Water conditions shared", dailyLimit: 3 },
+  ramp_report_created: { points: 5, title: "Boat ramp report shared", dailyLimit: 3 },
+  hazard_report_created: { points: 10, title: "Hazard report shared", dailyLimit: 3 },
+  video_uploaded: { points: 25, title: "Community video uploaded", dailyLimit: 3 },
+  post_likes_25: { points: 10, title: "Post reached 25 likes", dailyLimit: 1000 },
+  post_likes_100: { points: 50, title: "Post reached 100 likes", dailyLimit: 1000 },
+} as const;
+
+type RewardEventType = keyof typeof REWARD_RULES;
+
+const REWARD_LEVELS = [
+  { level: 1, name: "Deckhand", min_points: 0 },
+  { level: 2, name: "Crew Member", min_points: 100 },
+  { level: 3, name: "Angler", min_points: 300 },
+  { level: 4, name: "Skipper", min_points: 750 },
+  { level: 5, name: "Captain", min_points: 1500 },
+  { level: 6, name: "Offshore Captain", min_points: 3000 },
+  { level: 7, name: "Ocean Master", min_points: 7500 },
+  { level: 8, name: "OceanCore Legend", min_points: 15000 },
+];
+
+const REWARD_CATALOG = [
+  { id: "oceancore_plus", name: "OceanCore+ membership", category: "membership", status: "coming_soon", points: 5000 },
+  { id: "fuel_voucher", name: "Fuel vouchers", category: "voucher", status: "partner_review", points: 7500 },
+  { id: "tackle_voucher", name: "Tackle vouchers", category: "voucher", status: "partner_review", points: 7500 },
+  { id: "camping_gear", name: "Camping gear", category: "gear", status: "coming_soon", points: 10000 },
+  { id: "boat_accessories", name: "Boat accessories", category: "gear", status: "coming_soon", points: 12000 },
+  { id: "merchandise", name: "OceanCore merchandise", category: "merchandise", status: "coming_soon", points: 4000 },
+];
+
+function normalizeRewardLedger(row: any): RewardLedgerRow {
+  return {
+    id: String(row?.id || crypto.randomUUID()),
+    user_id: String(row?.user_id || DEV_GUEST_USER_ID),
+    user_email: row?.user_email ?? null,
+    event_type: str(row?.event_type, "unknown"),
+    event_key: str(row?.event_key, crypto.randomUUID()),
+    points: Math.trunc(Number(row?.points || 0)),
+    title: str(row?.title, "OceanPoints earned"),
+    source_type: row?.source_type ?? null,
+    source_id: row?.source_id ?? null,
+    metadata: row?.metadata && typeof row.metadata === "object" ? row.metadata : {},
+    status: str(row?.status, "earned"),
+    created_at: row?.created_at || new Date().toISOString(),
+  };
+}
+
+function rewardLevelForPoints(points: number) {
+  const total = Math.max(0, Math.trunc(Number(points || 0)));
+  let current = REWARD_LEVELS[0];
+  for (const level of REWARD_LEVELS) {
+    if (total >= level.min_points) current = level;
+  }
+  const next = REWARD_LEVELS.find((level) => level.min_points > total) || null;
+  const levelStart = current.min_points;
+  const levelEnd = next?.min_points ?? total;
+  const progress = next
+    ? Math.max(0, Math.min(100, Math.round(((total - levelStart) / Math.max(1, levelEnd - levelStart)) * 100)))
+    : 100;
+  return {
+    ...current,
+    next,
+    points_into_level: total - levelStart,
+    points_to_next: next ? Math.max(0, next.min_points - total) : 0,
+    progress_percent: progress,
+  };
+}
+
+async function readLocalRewardLedger(): Promise<RewardLedgerRow[]> {
+  try {
+    const raw = await fs.promises.readFile(REWARD_LEDGER_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? parsed.map(normalizeRewardLedger) : [];
+    mem.rewardLedger = rows;
+    return rows;
+  } catch {
+    return mem.rewardLedger;
+  }
+}
+
+async function writeLocalRewardLedger(rows: RewardLedgerRow[]) {
+  mem.rewardLedger = rows.slice(-10000);
+  await fs.promises.writeFile(REWARD_LEDGER_FILE, JSON.stringify(mem.rewardLedger, null, 2), "utf8");
+}
+
+async function listRewardLedger(user: AuthUser, limit = 5000): Promise<{ rows: RewardLedgerRow[]; storage: string }> {
+  if (supabase && !user.isGuest) {
+    try {
+      const res = await supabase
+        .from(REWARD_LEDGER_TABLE)
+        .select("id,user_id,user_email,event_type,event_key,points,title,source_type,source_id,metadata,status,created_at")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(clamp(limit, 1, 5000));
+      if (res.error) throw res.error;
+      return { rows: (res.data || []).map(normalizeRewardLedger), storage: "supabase" };
+    } catch (e) {
+      console.warn("reward ledger supabase list failed, using local storage", e);
+    }
+  }
+  const rows = await readLocalRewardLedger();
+  return {
+    rows: rows
+      .filter((row) => row.user_id === user.id)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, clamp(limit, 1, 5000)),
+    storage: "local",
+  };
+}
+
+async function rewardSummaryForUser(user: AuthUser) {
+  const result = await listRewardLedger(user, 5000);
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+  const total = result.rows.reduce((sum, row) => sum + Number(row.points || 0), 0);
+  const monthPoints = result.rows
+    .filter((row) => row.created_at >= monthStart)
+    .reduce((sum, row) => sum + Number(row.points || 0), 0);
+  const byType = result.rows.reduce<Record<string, number>>((acc, row) => {
+    acc[row.event_type] = (acc[row.event_type] || 0) + Number(row.points || 0);
+    return acc;
+  }, {});
+  return {
+    balance: Math.max(0, total),
+    lifetime_points: Math.max(0, total),
+    month_points: Math.max(0, monthPoints),
+    level: rewardLevelForPoints(total),
+    activity: result.rows.slice(0, 50),
+    points_by_type: byType,
+    storage: result.storage,
+  };
+}
+
+async function awardRewardPoints(
+  user: AuthUser,
+  eventType: RewardEventType,
+  eventKey: string,
+  sourceType: string,
+  sourceId: string,
+  metadata: Record<string, any> = {}
+) {
+  const rule = REWARD_RULES[eventType];
+  if (!rule) return { awarded: false, points: 0, reason: "unknown_event" };
+  if (supabase && user.isGuest) return { awarded: false, points: 0, reason: "sign_in_required" };
+
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+  const row = normalizeRewardLedger({
+    id: crypto.randomUUID(),
+    user_id: user.id,
+    user_email: user.email ?? null,
+    event_type: eventType,
+    event_key: eventKey,
+    points: rule.points,
+    title: rule.title,
+    source_type: sourceType,
+    source_id: sourceId,
+    metadata,
+    status: "earned",
+    created_at: createdAt,
+  });
+
+  if (supabase && !user.isGuest) {
+    try {
+      const existing = await supabase
+        .from(REWARD_LEDGER_TABLE)
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("event_key", eventKey)
+        .maybeSingle();
+      if (existing.data) return { awarded: false, points: 0, reason: "already_awarded" };
+      const daily = await supabase
+        .from(REWARD_LEDGER_TABLE)
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", user.id)
+        .eq("event_type", eventType)
+        .gte("created_at", dayStart);
+      if (Number(daily.count || 0) >= rule.dailyLimit) {
+        return { awarded: false, points: 0, reason: "daily_limit_reached" };
+      }
+      const inserted = await supabase.from(REWARD_LEDGER_TABLE).insert(row);
+      if (inserted.error) {
+        if ((inserted.error as any)?.code === "23505") return { awarded: false, points: 0, reason: "already_awarded" };
+        throw inserted.error;
+      }
+      return { awarded: true, points: rule.points, reason: "earned", event_type: eventType };
+    } catch (e) {
+      console.warn("reward ledger supabase award failed, using local storage", e);
+    }
+  }
+
+  const rows = await readLocalRewardLedger();
+  if (rows.some((item) => item.user_id === user.id && item.event_key === eventKey)) {
+    return { awarded: false, points: 0, reason: "already_awarded" };
+  }
+  const dailyCount = rows.filter(
+    (item) => item.user_id === user.id && item.event_type === eventType && item.created_at >= dayStart
+  ).length;
+  if (dailyCount >= rule.dailyLimit) return { awarded: false, points: 0, reason: "daily_limit_reached" };
+  rows.push(row);
+  await writeLocalRewardLedger(rows);
+  return { awarded: true, points: rule.points, reason: "earned", event_type: eventType };
+}
+
+async function awardRewardBatch(
+  user: AuthUser,
+  events: { type: RewardEventType; key: string; sourceType: string; sourceId: string; metadata?: Record<string, any> }[]
+) {
+  const awards = [];
+  for (const event of events) {
+    awards.push(await awardRewardPoints(user, event.type, event.key, event.sourceType, event.sourceId, event.metadata));
+  }
+  return awards;
+}
+
+function rewardEventsForCatch(row: CatchRow, speciesConfirmed = false) {
+  const events: { type: RewardEventType; key: string; sourceType: string; sourceId: string; metadata?: Record<string, any> }[] = [
+    { type: "catch_submitted", key: `catch:${row.id}:submitted`, sourceType: "catch", sourceId: row.id },
+  ];
+  if (row.photo_url) events.push({ type: "catch_photo_uploaded", key: `catch:${row.id}:photo`, sourceType: "catch", sourceId: row.id });
+  if (speciesConfirmed) events.push({
+    type: "species_confirmed",
+    key: `catch:${row.id}:species-confirmed`,
+    sourceType: "catch",
+    sourceId: row.id,
+    metadata: { species: row.species },
+  });
+  return events;
+}
+
+function communityReportRewardType(post: CommunityPostRow): RewardEventType | null {
+  const text = `${post.title || ""} ${post.caption || ""} ${post.species || ""}`.toLowerCase();
+  if (/(hazard|danger|debris|bar crossing|unsafe|warning)/.test(text)) return "hazard_report_created";
+  if (/(trip report|trip recap|trip summary)/.test(text)) return "trip_report_created";
+  if (/(ramp|boat ramp|launch|pontoon|jetty)/.test(text)) return "ramp_report_created";
+  if (/(weather|wind|swell|storm|rain|forecast)/.test(text)) return "weather_report_created";
+  if (/(water condition|water temp|temperature|clarity|current|tide)/.test(text)) return "water_report_created";
+  return null;
+}
+
+function rewardEventsForCommunityPost(post: CommunityPostRow) {
+  const events: { type: RewardEventType; key: string; sourceType: string; sourceId: string; metadata?: Record<string, any> }[] = [
+    { type: "community_post_created", key: `community-post:${post.id}:created`, sourceType: "community_post", sourceId: post.id },
+  ];
+  if (post.media_type === "video" || String(post.media_mime || "").startsWith("video/")) {
+    events.push({ type: "video_uploaded", key: `community-post:${post.id}:video`, sourceType: "community_post", sourceId: post.id });
+  }
+  const reportType = communityReportRewardType(post);
+  if (reportType) {
+    events.push({ type: reportType, key: `community-post:${post.id}:${reportType}`, sourceType: "community_post", sourceId: post.id });
+  }
+  return events;
+}
+
+async function awardCommunityLikeMilestones(post: CommunityPostRow, likesCount: number) {
+  if (!post.user_id) return [];
+  const owner: AuthUser = { id: post.user_id, email: post.user_email ?? null, isGuest: false, user_metadata: {} };
+  const events = [];
+  if (likesCount >= 25) events.push({ type: "post_likes_25" as RewardEventType, key: `community-post:${post.id}:likes-25`, sourceType: "community_post", sourceId: post.id });
+  if (likesCount >= 100) events.push({ type: "post_likes_100" as RewardEventType, key: `community-post:${post.id}:likes-100`, sourceType: "community_post", sourceId: post.id });
+  return awardRewardBatch(owner, events);
+}
+
+async function reconcileUserRewards(user: AuthUser) {
+  const awards = [];
+  const catches = await listUserCatches(user, 1000).catch(() => []);
+  for (const row of catches) awards.push(...(await awardRewardBatch(user, rewardEventsForCatch(row, false))));
+  const community = await listCommunityPostsForUser(user, "").catch(() => ({ posts: [] as CommunityPostRow[], storage: "unavailable" }));
+  for (const post of community.posts.filter((row) => row.user_id === user.id && row.status !== "deleted")) {
+    awards.push(...(await awardRewardBatch(user, rewardEventsForCommunityPost(post))));
+    awards.push(...(await awardCommunityLikeMilestones(post, Number(post.likes_count || 0))));
+  }
+  return {
+    checked: catches.length + community.posts.filter((row) => row.user_id === user.id).length,
+    awarded_points: awards.filter((award: any) => award.awarded).reduce((sum: number, award: any) => sum + Number(award.points || 0), 0),
+    awards,
   };
 }
 
@@ -2527,6 +2846,7 @@ app.get("/health", async (_req, reply) => {
     feedback_table: FEEDBACK_TABLE,
     community_posts_table: COMMUNITY_POSTS_TABLE,
     account_settings_table: ACCOUNT_SETTINGS_TABLE,
+    reward_ledger_table: REWARD_LEDGER_TABLE,
     audit_table: AUDIT_TABLE,
     using_profiles_table: !!PROFILES_TABLE,
     admin_enabled: ADMIN_EMAILS.length > 0 || ADMIN_USER_IDS.length > 0,
@@ -2577,6 +2897,9 @@ app.get("/health", async (_req, reply) => {
       "subscription_status",
       "stripe_checkout",
       "free_starter_basic_pro_plans",
+      "oceancore_rewards",
+      "oceanpoints_ledger",
+      "reward_levels",
     ],
     removed_features: [
       "predict",
@@ -2841,15 +3164,12 @@ app.get("/auth/me", async (req, reply) => {
       settings_warning: accountSettings?.warning || null,
       settings_updated_at: accountSettings?.updated_at || null,
       legal: {
-        version: profile.legal_version || LEGAL_VERSION,
-        terms: !!profile.accepted_terms_at,
-        privacy: !!profile.accepted_privacy_at,
-        disclaimer: !!profile.accepted_disclaimer_at,
-        accepted: !!(
-          profile.accepted_terms_at &&
-          profile.accepted_privacy_at &&
-          profile.accepted_disclaimer_at
-        ),
+        version: LEGAL_VERSION,
+        accepted_version: profile.legal_version || null,
+        terms: hasCurrentLegalAcceptance(profile),
+        privacy: hasCurrentLegalAcceptance(profile),
+        disclaimer: hasCurrentLegalAcceptance(profile),
+        accepted: hasCurrentLegalAcceptance(profile),
       },
     });
   } catch (e) {
@@ -2934,6 +3254,7 @@ app.get("/auth/export-data", async (req, reply) => {
       ? await supabase.from(FEEDBACK_TABLE).select("id,type,message,page,status,created_at,updated_at").eq("user_id", user.id).limit(1000).then((r) => r.data || []).catch(() => [])
       : mem.feedback.filter((row) => row.user_id === user.id || row.user_email === user.email);
     const aiChats = await listAiChatSessionsForUser(user, 500).catch(() => []);
+    const rewards = await listRewardLedger(user, 5000).catch(() => ({ rows: [] as RewardLedgerRow[], storage: "unavailable" }));
     ok(reply, {
       success: true,
       exported_at: new Date().toISOString(),
@@ -2945,6 +3266,7 @@ app.get("/auth/export-data", async (req, reply) => {
       community_posts: community.posts,
       feedback,
       ai_chat_sessions: aiChats,
+      reward_ledger: rewards.rows,
     });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
@@ -2963,6 +3285,8 @@ app.delete("/auth/account", async (req, reply) => {
       mem.catches = mem.catches.filter((row) => row.user_id !== user.id);
       mem.savedAreas = mem.savedAreas.filter((row) => row.user_id !== user.id);
       mem.feedback = mem.feedback.filter((row) => row.user_id !== user.id);
+      mem.rewardLedger = mem.rewardLedger.filter((row) => row.user_id !== user.id);
+      await writeLocalRewardLedger(mem.rewardLedger);
       mem.communityPosts = mem.communityPosts.map((row) => row.user_id === user.id ? normalizeCommunityPost({ ...row, status: "deleted" }) : row);
       await writeLocalCommunityPosts(mem.communityPosts);
       ok(reply, { success: true, deleted: true, storage: "local" });
@@ -2980,6 +3304,7 @@ app.delete("/auth/account", async (req, reply) => {
       supabase.from(AI_CHAT_MESSAGES_TABLE).delete().eq("user_id", user.id),
       supabase.from(AI_CHAT_SESSIONS_TABLE).delete().eq("user_id", user.id),
       supabase.from(AI_MEMORY_TABLE).delete().eq("user_id", user.id),
+      supabase.from(REWARD_LEDGER_TABLE).delete().eq("user_id", user.id),
       supabase.from(ACCOUNT_SETTINGS_TABLE).delete().eq("user_id", user.id),
       supabase.from(PROFILES_TABLE).delete().eq("id", user.id),
     ]);
@@ -2996,15 +3321,12 @@ app.get("/auth/legal-status", async (req, reply) => {
     const profile = await getProfileForUser(user);
     ok(reply, {
       success: true,
-      version: profile.legal_version || LEGAL_VERSION,
-      accepted: !!(
-        profile.accepted_terms_at &&
-        profile.accepted_privacy_at &&
-        profile.accepted_disclaimer_at
-      ),
-      terms: !!profile.accepted_terms_at,
-      privacy: !!profile.accepted_privacy_at,
-      disclaimer: !!profile.accepted_disclaimer_at,
+      version: LEGAL_VERSION,
+      accepted_version: profile.legal_version || null,
+      accepted: hasCurrentLegalAcceptance(profile),
+      terms: hasCurrentLegalAcceptance(profile),
+      privacy: hasCurrentLegalAcceptance(profile),
+      disclaimer: hasCurrentLegalAcceptance(profile),
     });
   } catch (e) {
     fail(reply, e, 401);
@@ -3026,7 +3348,7 @@ app.post("/auth/accept-legal", async (req, reply) => {
       accepted_terms_at: bool(body.terms) ? acceptedAt : current.accepted_terms_at,
       accepted_privacy_at: bool(body.privacy) ? acceptedAt : current.accepted_privacy_at,
       accepted_disclaimer_at: bool(body.disclaimer) ? acceptedAt : current.accepted_disclaimer_at,
-      legal_version: str(body.version) || current.legal_version || LEGAL_VERSION,
+      legal_version: LEGAL_VERSION,
       updated_at: new Date().toISOString(),
     };
 
@@ -3054,11 +3376,7 @@ app.post("/auth/accept-legal", async (req, reply) => {
     ok(reply, {
       success: true,
       profile: saved,
-      accepted: !!(
-        saved.accepted_terms_at &&
-        saved.accepted_privacy_at &&
-        saved.accepted_disclaimer_at
-      ),
+      accepted: hasCurrentLegalAcceptance(saved),
     });
   } catch (e) {
     fail(reply, e, 401);
@@ -3125,6 +3443,7 @@ app.post("/catches", async (req, reply) => {
       notes: str(body.notes) || null,
       photo_url: photoUrl,
     });
+    const rewards = await awardRewardBatch(user, rewardEventsForCatch(saved, body.species_confirmed === true));
 
     ok(reply, {
       success: true,
@@ -3132,6 +3451,7 @@ app.post("/catches", async (req, reply) => {
         ...saved,
         photo_url: makeAbsoluteMediaUrl(req, saved.photo_url),
       },
+      rewards,
     });
   } catch (e) {
     fail(reply, e);
@@ -3164,6 +3484,7 @@ app.post("/catches/with-photo", async (req, reply) => {
       notes: str(body.notes) || null,
       photo_url: photoUrl,
     });
+    const rewards = await awardRewardBatch(user, rewardEventsForCatch(saved, body.species_confirmed === true));
 
     ok(reply, {
       success: true,
@@ -3171,6 +3492,7 @@ app.post("/catches/with-photo", async (req, reply) => {
         ...saved,
         photo_url: makeAbsoluteMediaUrl(req, saved.photo_url),
       },
+      rewards,
     });
   } catch (e) {
     fail(reply, e);
@@ -3208,6 +3530,60 @@ app.get("/api/stats", async (req, reply) => {
     fail(reply, e);
   }
 });
+
+const rewardsCatalogHandler = async (_req: any, reply: any) => {
+  ok(reply, {
+    success: true,
+    program: "OceanCore Rewards",
+    currency: "OceanPoints",
+    phase: "earn_and_track",
+    rules: Object.entries(REWARD_RULES).map(([event_type, rule]) => ({ event_type, ...rule })),
+    levels: REWARD_LEVELS,
+    catalog: REWARD_CATALOG,
+    notice: "OceanPoints have no cash value. Redemption partners, giveaways, and creator payouts are not active until their terms and operations are approved.",
+  });
+};
+
+const rewardsMeHandler = async (req: any, reply: any) => {
+  try {
+    const user = supabase ? await getRequiredAuthUser(req) : await getAuthUser(req);
+    const summary = await rewardSummaryForUser(user);
+    ok(reply, {
+      success: true,
+      user: { id: user.id, email: user.email },
+      ...summary,
+      creator: {
+        enrolled: false,
+        level: null,
+        founder_creator_places: 100,
+        status: "applications_coming_soon",
+      },
+      catalog: REWARD_CATALOG,
+      rules: Object.entries(REWARD_RULES).map(([event_type, rule]) => ({ event_type, ...rule })),
+      levels: REWARD_LEVELS,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+};
+
+const rewardsReconcileHandler = async (req: any, reply: any) => {
+  try {
+    const user = supabase ? await getRequiredAuthUser(req) : await getAuthUser(req);
+    const result = await reconcileUserRewards(user);
+    const summary = await rewardSummaryForUser(user);
+    ok(reply, { success: true, ...result, summary });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+};
+
+app.get("/rewards/catalog", rewardsCatalogHandler);
+app.get("/api/rewards/catalog", rewardsCatalogHandler);
+app.get("/rewards/me", rewardsMeHandler);
+app.get("/api/rewards/me", rewardsMeHandler);
+app.post("/rewards/reconcile", rewardsReconcileHandler);
+app.post("/api/rewards/reconcile", rewardsReconcileHandler);
 
 app.get("/api/geocode/search", async (req, reply) => {
   try {
@@ -4526,10 +4902,12 @@ async function createCommunityPostHandler(req: any, reply: any) {
     });
 
     const saved = await saveCommunityPost(row);
+    const rewards = await awardRewardBatch(user, rewardEventsForCommunityPost(saved.post));
     ok(reply, {
       success: true,
       post: withPublicCommunityMedia(req, saved.post),
       storage: saved.storage,
+      rewards,
     });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
@@ -4573,7 +4951,8 @@ async function communityLikeHandler(req: any, reply: any) {
         const countRes = await supabase.from("community_likes").select("post_id", { count: "exact", head: true }).eq("post_id", postId);
         likesCount = Number(countRes.count || 0);
         await supabase.from(COMMUNITY_POSTS_TABLE).update({ likes_count: likesCount, updated_at: new Date().toISOString() }).eq("id", postId);
-        ok(reply, { success: true, liked, likes_count: likesCount });
+        const rewards = liked ? await awardCommunityLikeMilestones(post, likesCount) : [];
+        ok(reply, { success: true, liked, likes_count: likesCount, rewards });
         return;
       } catch (e) {
         console.warn("community like supabase failed, using local storage", e);
@@ -4597,7 +4976,8 @@ async function communityLikeHandler(req: any, reply: any) {
       posts[postIdx].updated_at = new Date().toISOString();
       await writeLocalCommunityPosts(posts);
     }
-    ok(reply, { success: true, liked, likes_count: likesCount });
+    const rewards = liked ? await awardCommunityLikeMilestones(post, likesCount) : [];
+    ok(reply, { success: true, liked, likes_count: likesCount, rewards });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
@@ -4661,11 +5041,20 @@ async function createCommunityCommentHandler(req: any, reply: any) {
         if (saved.error) throw saved.error;
         const countRes = await supabase.from("community_comments").select("id", { count: "exact", head: true }).eq("post_id", postId).eq("status", "active");
         await supabase.from(COMMUNITY_POSTS_TABLE).update({ comments_count: Number(countRes.count || 0), updated_at: now }).eq("id", postId);
+        const rewards = commentStatus === "active"
+          ? await awardRewardBatch(user, [{
+              type: "community_comment_created",
+              key: `community-comment:${row.id}:created`,
+              sourceType: "community_comment",
+              sourceId: row.id,
+            }])
+          : [];
         ok(reply, {
           success: true,
           comment: normalizeCommunityComment(saved.data),
           comments_count: Number(countRes.count || 0),
           held_for_review: commentStatus !== "active",
+          rewards,
         });
         return;
       } catch (e) {
@@ -4684,7 +5073,15 @@ async function createCommunityCommentHandler(req: any, reply: any) {
       posts[idx].updated_at = now;
       await writeLocalCommunityPosts(posts);
     }
-    ok(reply, { success: true, comment: row, comments_count: commentsCount, held_for_review: commentStatus !== "active" });
+    const rewards = commentStatus === "active"
+      ? await awardRewardBatch(user, [{
+          type: "community_comment_created",
+          key: `community-comment:${row.id}:created`,
+          sourceType: "community_comment",
+          sourceId: row.id,
+        }])
+      : [];
+    ok(reply, { success: true, comment: row, comments_count: commentsCount, held_for_review: commentStatus !== "active", rewards });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
@@ -5533,6 +5930,9 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/api/community/posts/:id",
       "/admin/community/posts",
       "/admin/community/posts/:id",
+      "/rewards/catalog",
+      "/rewards/me",
+      "/rewards/reconcile",
       "/api/boat/catalog/boats",
       "/api/boat/catalog/outboards",
       "/api/boat/trip-log",

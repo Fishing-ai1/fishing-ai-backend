@@ -210,6 +210,22 @@ create table if not exists public.usage_daily (
   unique(user_id, usage_date)
 );
 
+create table if not exists public.reward_ledger (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  user_email text,
+  event_type text not null,
+  event_key text not null,
+  points integer not null check (points <> 0),
+  title text not null,
+  source_type text,
+  source_id text,
+  metadata jsonb not null default '{}'::jsonb,
+  status text not null default 'earned',
+  created_at timestamptz not null default now(),
+  unique(user_id, event_key)
+);
+
 create table if not exists public.audit_log (
   id uuid primary key default gen_random_uuid(),
   actor_id uuid,
@@ -322,6 +338,8 @@ create index if not exists community_posts_user_idx on public.community_posts(us
 create index if not exists community_comments_post_idx on public.community_comments(post_id, created_at asc);
 create index if not exists community_reports_status_idx on public.community_reports(status, created_at desc);
 create index if not exists ai_messages_session_idx on public.ai_chat_messages(session_id, created_at asc);
+create index if not exists reward_ledger_user_created_idx on public.reward_ledger(user_id, created_at desc);
+create index if not exists reward_ledger_user_event_idx on public.reward_ledger(user_id, event_type, created_at desc);
 create index if not exists audit_log_created_idx on public.audit_log(created_at desc);
 create index if not exists boat_models_search_idx on public.boat_models using gin (to_tsvector('simple', coalesce(search_keywords,'') || ' ' || coalesce(brand,'') || ' ' || coalesce(model,'')));
 create index if not exists outboard_models_search_idx on public.outboard_models using gin (to_tsvector('simple', coalesce(search_keywords,'') || ' ' || coalesce(brand,'') || ' ' || coalesce(model,'')));
@@ -355,6 +373,7 @@ alter table public.ai_chat_messages enable row level security;
 alter table public.ai_memory enable row level security;
 alter table public.ai_feedback enable row level security;
 alter table public.usage_daily enable row level security;
+alter table public.reward_ledger enable row level security;
 alter table public.boat_ai_trip_logs enable row level security;
 alter table public.boat_ai_learning_events enable row level security;
 
@@ -392,5 +411,7 @@ drop policy if exists "ai feedback own rows" on public.ai_feedback;
 create policy "ai feedback own rows" on public.ai_feedback for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 drop policy if exists "usage own rows" on public.usage_daily;
 create policy "usage own rows" on public.usage_daily for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "reward ledger own reads" on public.reward_ledger;
+create policy "reward ledger own reads" on public.reward_ledger for select using (auth.uid() = user_id);
 drop policy if exists "boat trips own rows" on public.boat_ai_trip_logs;
 create policy "boat trips own rows" on public.boat_ai_trip_logs for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
