@@ -355,6 +355,15 @@ type CommunityPostRow = {
   general_area?: string | null;
   caption?: string | null;
   category?: string | null;
+  post_type?: string | null;
+  topic?: string | null;
+  bait?: string | null;
+  conditions?: string | null;
+  length_cm?: number | null;
+  weight_kg?: number | null;
+  tags?: string[] | null;
+  poll_question?: string | null;
+  poll_options?: { id: string; label: string; votes: number }[] | null;
   privacy?: string | null;
   media_url?: string | null;
   media_mime?: string | null;
@@ -587,6 +596,8 @@ const COMMUNITY_POSTS_FILE = path.join(DATA_DIR, "community-posts.json");
 const COMMUNITY_COMMENTS_FILE = path.join(DATA_DIR, "community-comments.json");
 const COMMUNITY_REPORTS_FILE = path.join(DATA_DIR, "community-reports.json");
 const COMMUNITY_LIKES_FILE = path.join(DATA_DIR, "community-likes.json");
+const COMMUNITY_FOLLOWS_FILE = path.join(DATA_DIR, "community-follows.json");
+const COMMUNITY_POLL_VOTES_FILE = path.join(DATA_DIR, "community-poll-votes.json");
 const REWARD_LEDGER_FILE = path.join(DATA_DIR, "reward-ledger.json");
 const AVATAR_IMAGE_MAX_BYTES = Number(process.env.AVATAR_IMAGE_MAX_BYTES || 5 * 1024 * 1024);
 const CATCH_PHOTO_MAX_BYTES = Number(process.env.CATCH_PHOTO_MAX_BYTES || 12 * 1024 * 1024);
@@ -734,6 +745,8 @@ const mem = {
   communityComments: [] as CommunityCommentRow[],
   communityReports: [] as CommunityReportRow[],
   communityLikes: [] as { post_id: string; user_id: string; user_email?: string | null; created_at: string }[],
+  communityFollows: [] as { follower_id: string; following_id: string; created_at: string }[],
+  communityPollVotes: [] as { post_id: string; option_id: string; user_id: string; created_at: string }[],
   accountSettings: new Map<string, AccountSettingsRow>(),
   rewardLedger: [] as RewardLedgerRow[],
 };
@@ -4539,7 +4552,7 @@ app.delete("/saved-areas/:id", async (req, reply) => {
 // Community - real feed storage, media upload, and filters
 // ============================================================
 const COMMUNITY_POST_SELECT =
-  "id,user_id,user_email,author_name,title,species,general_area,caption,category,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,created_at,updated_at";
+  "id,user_id,user_email,author_name,title,species,general_area,caption,category,post_type,topic,bait,conditions,length_cm,weight_kg,tags,poll_question,poll_options,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,created_at,updated_at";
 const COMMUNITY_COMMENT_SELECT =
   "id,post_id,user_id,user_email,author_name,body,status,created_at,updated_at";
 const COMMUNITY_REPORT_SELECT =
@@ -4547,11 +4560,35 @@ const COMMUNITY_REPORT_SELECT =
 
 function normalizeCommunityCategory(input: any, fallbackText = "") {
   const raw = str(input, "").toLowerCase();
-  if (["feed", "reports", "build"].includes(raw)) return raw;
+  if (["following", "local", "trending", "videos", "boats", "offshore", "freshwater", "camping"].includes(raw)) return raw;
   const text = fallbackText.toLowerCase();
-  if (/(ramp|weather|wind|swell|tide|water|clarity|report|conditions|bar crossing|fuel)/i.test(text)) return "reports";
-  if (/(build|release|feature|beta|app update|bug|fixed|roadmap)/i.test(text)) return "build";
-  return "feed";
+  if (/(boat|outboard|sounder|electronics|motor|trailer|modification|build)/i.test(text)) return "boats";
+  if (/(offshore|reef|pelagic|tuna|marlin|mahi|deep sea)/i.test(text)) return "offshore";
+  if (/(freshwater|dam|river|bass|cod|barramundi)/i.test(text)) return "freshwater";
+  if (/(camping|4wd|four wheel|caravan|swag)/i.test(text)) return "camping";
+  return "local";
+}
+
+function normalizeCommunityPostType(input: any, mediaType = "") {
+  const raw = str(input, "").toLowerCase().replace(/\s+/g, "_");
+  if (["fishing_report", "catch", "video", "boat", "discussion", "poll"].includes(raw)) return raw;
+  if (mediaType === "video") return "video";
+  return "discussion";
+}
+
+function normalizeCommunityTags(input: any) {
+  const values = Array.isArray(input) ? input : str(input, "").split(",");
+  return values.map((value) => str(value, "").toLowerCase().replace(/[^a-z0-9& -]/g, "").trim()).filter(Boolean).slice(0, 8);
+}
+
+function normalizePollOptions(input: any) {
+  const values = Array.isArray(input) ? input : [];
+  return values
+    .map((value: any, index: number) => typeof value === "string"
+      ? { id: `option-${index + 1}`, label: str(value, "").slice(0, 120), votes: 0 }
+      : { id: str(value?.id, `option-${index + 1}`).slice(0, 80), label: str(value?.label, "").slice(0, 120), votes: Number(value?.votes || 0) })
+    .filter((value: any) => value.label)
+    .slice(0, 6);
 }
 
 function normalizeCommunityPrivacy(input: any) {
@@ -4610,6 +4647,8 @@ function normalizeCommunityPost(row: any = {}): CommunityPostRow {
   const created = row.created_at || new Date().toISOString();
   const commentPermission = normalizeCommunityCommentPermission(row.comment_permission);
   const allowComments = row.allow_comments == null ? commentPermission !== "off" : !!row.allow_comments;
+  const mediaType = str(row.media_type, "").slice(0, 20) || null;
+  const postType = normalizeCommunityPostType(row.post_type, mediaType || "");
   return {
     id: String(row.id || crypto.randomUUID()),
     user_id: row.user_id ?? null,
@@ -4620,10 +4659,19 @@ function normalizeCommunityPost(row: any = {}): CommunityPostRow {
     general_area: str(row.general_area, "Spot Safe").slice(0, 140),
     caption,
     category,
+    post_type: postType,
+    topic: str(row.topic, "").slice(0, 100) || null,
+    bait: str(row.bait, "").slice(0, 100) || null,
+    conditions: str(row.conditions, "").slice(0, 300) || null,
+    length_cm: round2(num(row.length_cm)),
+    weight_kg: round2(num(row.weight_kg)),
+    tags: normalizeCommunityTags(row.tags),
+    poll_question: postType === "poll" ? str(row.poll_question, title).slice(0, 220) : null,
+    poll_options: postType === "poll" ? normalizePollOptions(row.poll_options) : [],
     privacy: normalizeCommunityPrivacy(row.privacy),
     media_url: str(row.media_url, "") || null,
     media_mime: str(row.media_mime, "").slice(0, 80) || null,
-    media_type: str(row.media_type, "").slice(0, 20) || null,
+    media_type: mediaType,
     allow_comments: allowComments,
     comment_permission: allowComments ? commentPermission : "off",
     hold_link_comments: row.hold_link_comments == null ? true : !!row.hold_link_comments,
@@ -4672,11 +4720,13 @@ function communityPostVisibleToUser(post: CommunityPostRow, user: AuthUser) {
   return post.privacy !== "private" || post.user_id === user.id;
 }
 
-function communityPostMatchesFilter(post: CommunityPostRow, filter: string) {
-  const tab = String(filter || "feed").toLowerCase();
-  if (tab === "reports") return post.category === "reports";
-  if (tab === "build") return post.category === "build";
-  return true;
+function communityPostMatchesFilter(post: CommunityPostRow, filter: string, followingIds: Set<string> = new Set()) {
+  const tab = String(filter || "local").toLowerCase();
+  if (tab === "following") return !!post.user_id && followingIds.has(post.user_id);
+  if (tab === "trending") return true;
+  if (tab === "videos") return post.post_type === "video" || post.media_type === "video";
+  if (["boats", "offshore", "freshwater", "camping"].includes(tab)) return post.category === tab;
+  return post.category === "local" || post.post_type === "fishing_report" || post.post_type === "catch";
 }
 
 async function getCommunityWriteUser(req: any): Promise<AuthUser> {
@@ -4751,7 +4801,50 @@ async function writeLocalCommunityLikes(rows: typeof mem.communityLikes) {
   await fs.promises.writeFile(COMMUNITY_LIKES_FILE, JSON.stringify(mem.communityLikes, null, 2), "utf8");
 }
 
+async function readLocalCommunityFollows() {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(COMMUNITY_FOLLOWS_FILE, "utf8"));
+    mem.communityFollows = Array.isArray(parsed) ? parsed : [];
+  } catch {}
+  return mem.communityFollows;
+}
+
+async function writeLocalCommunityFollows(rows: typeof mem.communityFollows) {
+  mem.communityFollows = rows.slice(-10000);
+  await fs.promises.writeFile(COMMUNITY_FOLLOWS_FILE, JSON.stringify(mem.communityFollows, null, 2), "utf8");
+}
+
+async function readLocalCommunityPollVotes() {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(COMMUNITY_POLL_VOTES_FILE, "utf8"));
+    mem.communityPollVotes = Array.isArray(parsed) ? parsed : [];
+  } catch {}
+  return mem.communityPollVotes;
+}
+
+async function writeLocalCommunityPollVotes(rows: typeof mem.communityPollVotes) {
+  mem.communityPollVotes = rows.slice(-20000);
+  await fs.promises.writeFile(COMMUNITY_POLL_VOTES_FILE, JSON.stringify(mem.communityPollVotes, null, 2), "utf8");
+}
+
+async function communityFollowingIds(userId: string) {
+  if (supabase) {
+    try {
+      const res = await supabase.from("community_follows").select("following_id").eq("follower_id", userId);
+      if (res.error) throw res.error;
+      return new Set((res.data || []).map((row: any) => String(row.following_id)));
+    } catch (e) {
+      console.warn("community follows list failed, using local storage", e);
+    }
+  }
+  return new Set((await readLocalCommunityFollows()).filter((row) => row.follower_id === userId).map((row) => row.following_id));
+}
+
 async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{ posts: CommunityPostRow[]; storage: string }> {
+  const followingIds = filter === "following" ? await communityFollowingIds(user.id) : new Set<string>();
+  const sortPosts = (posts: CommunityPostRow[]) => posts.sort((a, b) => filter === "trending"
+    ? (Number(b.likes_count || 0) * 3 + Number(b.comments_count || 0) * 5) - (Number(a.likes_count || 0) * 3 + Number(a.comments_count || 0) * 5)
+    : String(b.created_at).localeCompare(String(a.created_at)));
   if (supabase) {
     try {
       const res = await supabase
@@ -4761,10 +4854,10 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
         .limit(100);
       if (res.error) throw res.error;
       return {
-        posts: (res.data || [])
+        posts: sortPosts((res.data || [])
           .map(normalizeCommunityPost)
           .filter((post) => communityPostVisibleToUser(post, user))
-          .filter((post) => communityPostMatchesFilter(post, filter)),
+          .filter((post) => communityPostMatchesFilter(post, filter, followingIds))),
         storage: "supabase",
       };
     } catch (e) {
@@ -4783,8 +4876,10 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
         likes_count: likes.filter((row) => row.post_id === post.id).length,
       }))
       .filter((post) => communityPostVisibleToUser(post, user))
-      .filter((post) => communityPostMatchesFilter(post, filter))
-      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))),
+      .filter((post) => communityPostMatchesFilter(post, filter, followingIds))
+      .sort((a, b) => filter === "trending"
+        ? (Number(b.likes_count || 0) * 3 + Number(b.comments_count || 0) * 5) - (Number(a.likes_count || 0) * 3 + Number(a.comments_count || 0) * 5)
+        : String(b.created_at).localeCompare(String(a.created_at))),
     storage: "local",
   };
 }
@@ -4826,6 +4921,8 @@ async function communityPostsHandler(req: any, reply: any) {
       success: true,
       posts: result.posts.map((post) => withPublicCommunityMedia(req, post)),
       storage: result.storage,
+      filter: filter || "local",
+      spot_safe: true,
     });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
@@ -4873,6 +4970,10 @@ async function createCommunityPostHandler(req: any, reply: any) {
       "OceanCore fisher";
     const title = species || str(body.title, "") || (caption ? caption.split(/[.!?\n]/)[0] : "OceanCore update");
     const category = normalizeCommunityCategory(body.category, `${title} ${caption} ${body.general_area || ""}`);
+    const generalArea = str(body.general_area, "Spot Safe").slice(0, 140);
+    if (/^-?\d{1,3}\.\d{3,}\s*[,/]\s*-?\d{1,3}\.\d{3,}$/.test(generalArea.trim())) {
+      throw uploadError("Exact GPS marks cannot be published. Choose a general area instead.", 400);
+    }
     const commentPermission = normalizeCommunityCommentPermission(body.comment_permission);
     const allowComments = body.allow_comments == null ? commentPermission !== "off" : !!body.allow_comments;
     const now = new Date().toISOString();
@@ -4883,9 +4984,18 @@ async function createCommunityPostHandler(req: any, reply: any) {
       author_name: authorName,
       title,
       species,
-      general_area: str(body.general_area, "Spot Safe"),
+      general_area: generalArea,
       caption,
       category,
+      post_type: normalizeCommunityPostType(body.post_type, mediaType),
+      topic: body.topic,
+      bait: body.bait,
+      conditions: body.conditions,
+      length_cm: body.length_cm,
+      weight_kg: body.weight_kg,
+      tags: body.tags,
+      poll_question: body.poll_question,
+      poll_options: body.poll_options,
       privacy: body.privacy,
       media_url: mediaUrl,
       media_mime: mediaMime,
@@ -5192,6 +5302,145 @@ async function adminUpdateCommunityPostHandler(req: any, reply: any) {
   }
 }
 
+function activityStreak(rows: { created_at: string }[]) {
+  const days = new Set(rows.map((row) => String(row.created_at || "").slice(0, 10)).filter(Boolean));
+  let current = 0;
+  const cursor = new Date();
+  while (days.has(cursor.toISOString().slice(0, 10))) {
+    current += 1;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+  return { current_days: current, milestones: [1, 3, 7, 30, 90, 365], next_milestone: [1, 3, 7, 30, 90, 365].find((day) => day > current) || null };
+}
+
+async function communityProfileHandler(req: any, reply: any) {
+  try {
+    const viewer = await getAuthUser(req);
+    const userId = str(req.params?.id, viewer.id);
+    const all = await listCommunityPostsForUser(viewer, "trending");
+    const posts = all.posts.filter((post) => post.user_id === userId);
+    const follows = supabase
+      ? await supabase.from("community_follows").select("follower_id,following_id").or(`follower_id.eq.${userId},following_id.eq.${userId}`).then((res) => res.data || []).catch(() => [])
+      : await readLocalCommunityFollows();
+    const followers = follows.filter((row: any) => String(row.following_id) === userId).length;
+    const following = follows.filter((row: any) => String(row.follower_id) === userId).length;
+    const own = userId === viewer.id;
+    const rewards = own ? await rewardSummaryForUser(viewer) : null;
+    const catches = own ? await listUserCatches(viewer, 1000).catch(() => []) : [];
+    const speciesCounts = new Map<string, number>();
+    catches.forEach((row) => speciesCounts.set(row.species, (speciesCounts.get(row.species) || 0) + 1));
+    const largest = catches.sort((a, b) => Number(b.weight_kg || b.length_cm || 0) - Number(a.weight_kg || a.length_cm || 0))[0] || null;
+    const author = posts[0] || null;
+    ok(reply, {
+      success: true,
+      profile: {
+        user_id: userId,
+        name: author?.author_name || (own ? viewer.email : "OceanCore angler"),
+        avatar_url: null,
+        followers,
+        following,
+        is_following: follows.some((row: any) => String(row.follower_id) === viewer.id && String(row.following_id) === userId),
+        oceanpoints: rewards?.balance ?? null,
+        community_level: rewards?.level ?? null,
+        stats: {
+          total_catches: catches.length,
+          largest_fish: largest,
+          most_caught_species: [...speciesCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+          total_posts: posts.length,
+          total_videos: posts.filter((post) => post.post_type === "video" || post.media_type === "video").length,
+          total_likes: posts.reduce((sum, post) => sum + Number(post.likes_count || 0), 0),
+        },
+      },
+    });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityFollowHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const followingId = str(req.params?.id, "");
+    if (!followingId || followingId === user.id) throw uploadError("Choose another OceanCore member to follow.", 400);
+    let following = true;
+    if (supabase) {
+      const existing = await supabase.from("community_follows").select("follower_id").eq("follower_id", user.id).eq("following_id", followingId).maybeSingle();
+      if (existing.data) {
+        await supabase.from("community_follows").delete().eq("follower_id", user.id).eq("following_id", followingId);
+        following = false;
+      } else {
+        const saved = await supabase.from("community_follows").insert({ follower_id: user.id, following_id: followingId });
+        if (saved.error) throw saved.error;
+      }
+    } else {
+      const rows = await readLocalCommunityFollows();
+      const index = rows.findIndex((row) => row.follower_id === user.id && row.following_id === followingId);
+      if (index >= 0) { rows.splice(index, 1); following = false; }
+      else rows.push({ follower_id: user.id, following_id: followingId, created_at: new Date().toISOString() });
+      await writeLocalCommunityFollows(rows);
+    }
+    ok(reply, { success: true, following });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityPollVoteHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const postId = str(req.params?.id, "");
+    const optionId = str(req.body?.option_id, "");
+    const post = await findCommunityPostById(postId);
+    if (!post || post.post_type !== "poll") throw uploadError("Poll not found.", 404);
+    if (!(post.poll_options || []).some((option) => option.id === optionId)) throw uploadError("Choose a valid poll option.", 400);
+    if (supabase) {
+      const saved = await supabase.from("community_poll_votes").upsert({ post_id: postId, option_id: optionId, user_id: user.id, created_at: new Date().toISOString() }, { onConflict: "post_id,user_id" });
+      if (saved.error) throw saved.error;
+      const votes = await supabase.from("community_poll_votes").select("option_id").eq("post_id", postId);
+      post.poll_options = (post.poll_options || []).map((option) => ({ ...option, votes: (votes.data || []).filter((vote: any) => vote.option_id === option.id).length }));
+      await supabase.from(COMMUNITY_POSTS_TABLE).update({ poll_options: post.poll_options, updated_at: new Date().toISOString() }).eq("id", postId);
+    } else {
+      const votes = await readLocalCommunityPollVotes();
+      const existing = votes.find((vote) => vote.post_id === postId && vote.user_id === user.id);
+      if (existing) existing.option_id = optionId;
+      else votes.push({ post_id: postId, option_id: optionId, user_id: user.id, created_at: new Date().toISOString() });
+      await writeLocalCommunityPollVotes(votes);
+      post.poll_options = (post.poll_options || []).map((option) => ({ ...option, votes: votes.filter((vote) => vote.post_id === postId && vote.option_id === option.id).length }));
+      const posts = await readLocalCommunityPosts();
+      const index = posts.findIndex((row) => row.id === postId);
+      if (index >= 0) posts[index] = normalizeCommunityPost({ ...posts[index], poll_options: post.poll_options });
+      await writeLocalCommunityPosts(posts);
+    }
+    ok(reply, { success: true, poll_options: post.poll_options });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityDashboardHandler(req: any, reply: any) {
+  try {
+    const user = await getAuthUser(req);
+    const [posts, rewards] = await Promise.all([listCommunityPostsForUser(user, "trending"), listRewardLedger(user, 5000)]);
+    const byUser = new Map<string, { user_id: string; name: string; posts: number; videos: number; likes: number; comments: number; score: number }>();
+    posts.posts.forEach((post) => {
+      const id = String(post.user_id || "unknown");
+      const row = byUser.get(id) || { user_id: id, name: post.author_name || "OceanCore angler", posts: 0, videos: 0, likes: 0, comments: 0, score: 0 };
+      row.posts += 1; row.videos += post.post_type === "video" || post.media_type === "video" ? 1 : 0;
+      row.likes += Number(post.likes_count || 0); row.comments += Number(post.comments_count || 0);
+      row.score = row.posts * 2 + row.videos * 10 + row.likes * 3 + row.comments * 5;
+      byUser.set(id, row);
+    });
+    ok(reply, {
+      success: true,
+      streak: activityStreak(rewards.rows),
+      leaderboards: {
+        top_creators: [...byUser.values()].sort((a, b) => b.score - a.score).slice(0, 10),
+        most_helpful: [...byUser.values()].sort((a, b) => b.comments - a.comments).slice(0, 10),
+        most_viewed: [],
+      },
+      achievements: [
+        { id: "first_post", name: "First Post", unlocked: posts.posts.some((post) => post.user_id === user.id) },
+        { id: "first_video", name: "First Video", unlocked: posts.posts.some((post) => post.user_id === user.id && (post.post_type === "video" || post.media_type === "video")) },
+        { id: "community_10", name: "Community Regular", unlocked: posts.posts.filter((post) => post.user_id === user.id).length >= 10 },
+      ],
+    });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
 app.get("/community/posts", communityPostsHandler);
 app.get("/api/community/posts", communityPostsHandler);
 app.post("/community/posts", createCommunityPostHandler);
@@ -5206,6 +5455,14 @@ app.post("/community/posts/:id/report", reportCommunityPostHandler);
 app.post("/api/community/posts/:id/report", reportCommunityPostHandler);
 app.delete("/community/posts/:id", deleteCommunityPostHandler);
 app.delete("/api/community/posts/:id", deleteCommunityPostHandler);
+app.get("/community/profile/:id", communityProfileHandler);
+app.get("/api/community/profile/:id", communityProfileHandler);
+app.post("/community/profile/:id/follow", communityFollowHandler);
+app.post("/api/community/profile/:id/follow", communityFollowHandler);
+app.post("/community/posts/:id/vote", communityPollVoteHandler);
+app.post("/api/community/posts/:id/vote", communityPollVoteHandler);
+app.get("/community/dashboard", communityDashboardHandler);
+app.get("/api/community/dashboard", communityDashboardHandler);
 app.get("/admin/community/posts", adminCommunityPostsHandler);
 app.patch("/admin/community/posts/:id", adminUpdateCommunityPostHandler);
 

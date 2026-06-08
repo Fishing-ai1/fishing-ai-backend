@@ -12,6 +12,8 @@ const dataFiles = [
   "community-comments.json",
   "community-reports.json",
   "community-likes.json",
+  "community-follows.json",
+  "community-poll-votes.json",
   "reward-ledger.json",
 ];
 
@@ -410,6 +412,77 @@ async function checkCommunityModeration(baseUrl) {
   }
 }
 
+async function checkCommunityTwoFoundation(baseUrl) {
+  const exact = await fetch(`${baseUrl}/api/community/posts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      species: "Secret mark",
+      general_area: "-27.12345, 153.12345",
+      caption: "Should not publish exact coordinates.",
+      privacy: "public",
+    }),
+  });
+  if (exact.status < 400) fail("community accepted an exact GPS mark as a public general area");
+
+  const video = await request(baseUrl, "/api/community/posts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      post_type: "video",
+      category: "offshore",
+      species: "Tuna",
+      general_area: "Offshore grounds",
+      caption: "Short form offshore clip.",
+      privacy: "public",
+      media_url: "https://example.com/oceancore-audit.mp4",
+      media_mime: "video/mp4",
+      media_type: "video",
+    }),
+  });
+  if (video.post?.post_type !== "video") fail("video post type did not round-trip");
+  if (video.post?.category !== "offshore") fail("community category did not round-trip");
+
+  const videos = await request(baseUrl, "/api/community/posts?filter=videos");
+  if (!(videos.posts || []).some((post) => post.id === video.post.id)) fail("video feed did not include video post");
+
+  const poll = await request(baseUrl, "/api/community/posts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      post_type: "poll",
+      species: "Crew poll",
+      general_area: "Moreton Bay",
+      caption: "Best bite window?",
+      privacy: "public",
+      poll_options: ["Dawn", "Run out tide", "Sunset"],
+    }),
+  });
+  const optionId = poll.post?.poll_options?.[0]?.id;
+  if (!optionId) fail("poll post did not create poll options");
+  const vote = await request(baseUrl, `/api/community/posts/${poll.post.id}/vote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ option_id: optionId }),
+  });
+  if (vote.poll_options?.[0]?.votes !== 1) fail("poll vote was not counted");
+
+  const profile = await request(baseUrl, `/api/community/profile/${video.post.user_id}`);
+  if (!profile.profile || profile.profile.stats.total_posts < 1) fail("community profile did not include post stats");
+
+  const follow = await request(baseUrl, `/api/community/profile/${video.post.user_id}-other/follow`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (follow.success !== true) fail("community follow endpoint failed");
+
+  const dashboard = await request(baseUrl, "/api/community/dashboard");
+  if (!dashboard.streak || !dashboard.leaderboards || !Array.isArray(dashboard.achievements)) {
+    fail("community dashboard did not return streaks, leaderboards and achievements");
+  }
+}
+
 async function checkRewardsMath(baseUrl) {
   const before = await request(baseUrl, "/rewards/me");
   const createdCatch = await request(baseUrl, "/catches", {
@@ -474,6 +547,9 @@ await check("catch privacy on disposable backend", () =>
 );
 await check("community moderation on disposable backend", () =>
   runTemporaryMemoryBackend((baseUrl) => checkCommunityModeration(baseUrl))
+);
+await check("Community 2.0 foundation on disposable backend", () =>
+  runTemporaryMemoryBackend((baseUrl) => checkCommunityTwoFoundation(baseUrl))
 );
 await check("OceanPoints math and duplicate prevention", () =>
   runTemporaryMemoryBackend((baseUrl) => checkRewardsMath(baseUrl))
