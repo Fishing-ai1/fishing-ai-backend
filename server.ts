@@ -66,6 +66,7 @@ const AUDIT_TABLE = process.env.AUDIT_TABLE || "audit_log";
 const USAGE_TABLE = process.env.USAGE_TABLE || "usage_daily";
 const SAVED_AREAS_TABLE = process.env.SAVED_AREAS_TABLE || "saved_areas";
 const COMMUNITY_POSTS_TABLE = process.env.COMMUNITY_POSTS_TABLE || "community_posts";
+const COMMUNITY_MEDIA_BUCKET = process.env.COMMUNITY_MEDIA_BUCKET || "community-media";
 const ACCOUNT_SETTINGS_TABLE = process.env.ACCOUNT_SETTINGS_TABLE || "account_settings";
 const REWARD_LEDGER_TABLE = process.env.REWARD_LEDGER_TABLE || "reward_ledger";
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4.1-mini";
@@ -1918,6 +1919,32 @@ async function saveDataUrlMedia(dataUrl: string): Promise<{ url: string; mime: s
   );
   const storageBuffer = stripImageUploadMetadata(parsed.mime, parsed.buffer);
   const filename = `community-${Date.now()}-${crypto.randomUUID()}.${parsed.ext}`;
+
+  if (supabase) {
+    try {
+      const uploaded = await supabase.storage
+        .from(COMMUNITY_MEDIA_BUCKET)
+        .upload(filename, storageBuffer, {
+          contentType: parsed.mime,
+          cacheControl: "31536000",
+          upsert: false,
+        });
+      if (uploaded.error) throw uploaded.error;
+      const publicUrl = supabase.storage.from(COMMUNITY_MEDIA_BUCKET).getPublicUrl(filename).data.publicUrl;
+      if (!publicUrl) throw new Error("Supabase did not return a public media URL.");
+      return {
+        url: publicUrl,
+        mime: parsed.mime,
+        type: parsed.mime.startsWith("video/") ? "video" : "image",
+      };
+    } catch (e) {
+      console.warn("community media Supabase upload failed", e);
+      if (IS_PRODUCTION) {
+        throw uploadError("Video could not be saved safely. Please try again shortly.", 503);
+      }
+    }
+  }
+
   const filepath = path.join(UPLOAD_DIR, filename);
   await fs.promises.writeFile(filepath, storageBuffer);
   return {
@@ -2858,6 +2885,8 @@ app.get("/health", async (_req, reply) => {
     profiles_table: PROFILES_TABLE,
     feedback_table: FEEDBACK_TABLE,
     community_posts_table: COMMUNITY_POSTS_TABLE,
+    community_media_bucket: COMMUNITY_MEDIA_BUCKET,
+    durable_community_required: IS_PRODUCTION,
     account_settings_table: ACCOUNT_SETTINGS_TABLE,
     reward_ledger_table: REWARD_LEDGER_TABLE,
     audit_table: AUDIT_TABLE,
@@ -4896,6 +4925,9 @@ async function saveCommunityPost(row: CommunityPostRow): Promise<{ post: Communi
       return { post: normalizeCommunityPost(saved.data), storage: "supabase" };
     } catch (e) {
       console.warn("community posts supabase insert failed, using local storage", e);
+      if (IS_PRODUCTION) {
+        throw uploadError("Community post could not be saved safely. Please try again shortly.", 503);
+      }
     }
   }
 
