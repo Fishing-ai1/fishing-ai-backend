@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-07_REWARDS_PHASE_1";
+const BUILD_ID = "OC_BACKEND_2026-06-10_DURABLE_COMMUNITY_MEDIA";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
