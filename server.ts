@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-10_ADMIN_CONTROL_ROOM";
+const BUILD_ID = "OC_BACKEND_2026-06-10_RESUMABLE_LONG_VIDEO";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -603,6 +603,7 @@ const REWARD_LEDGER_FILE = path.join(DATA_DIR, "reward-ledger.json");
 const AVATAR_IMAGE_MAX_BYTES = Number(process.env.AVATAR_IMAGE_MAX_BYTES || 5 * 1024 * 1024);
 const CATCH_PHOTO_MAX_BYTES = Number(process.env.CATCH_PHOTO_MAX_BYTES || 12 * 1024 * 1024);
 const COMMUNITY_MEDIA_MAX_BYTES = Number(process.env.COMMUNITY_MEDIA_MAX_BYTES || 35 * 1024 * 1024);
+const COMMUNITY_VIDEO_MAX_BYTES = Number(process.env.COMMUNITY_VIDEO_MAX_BYTES || 50 * 1024 * 1024);
 const IMAGE_UPLOAD_MIME_EXT = new Map([
   ["image/jpeg", "jpg"],
   ["image/jpg", "jpg"],
@@ -1954,6 +1955,53 @@ async function saveDataUrlMedia(dataUrl: string): Promise<{ url: string; mime: s
   };
 }
 
+function safeStorageObjectName(value: string) {
+  return String(value || "video")
+    .normalize("NFKD")
+    .replace(/[^\w.\-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(-120) || "video";
+}
+
+const communityMediaUploadTicketHandler = async (req: any, reply: any) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    if (!supabase) throw uploadError("Permanent video storage is not configured.", 503);
+    const body = (req.body || {}) as any;
+    const mime = str(body.mime, "").toLowerCase();
+    const size = Number(body.size || 0);
+    const originalName = safeStorageObjectName(str(body.name, "video.mp4"));
+    if (!mime.startsWith("video/") || !COMMUNITY_MEDIA_MIME_EXT.has(mime)) {
+      throw uploadError("Choose an MP4, MOV, or WebM video.", 400);
+    }
+    const buckets = await supabase.storage.listBuckets();
+    if (buckets.error) throw buckets.error;
+    const bucketLimit = Number((buckets.data || []).find((bucket: any) => bucket.name === COMMUNITY_MEDIA_BUCKET)?.file_size_limit || COMMUNITY_VIDEO_MAX_BYTES);
+    const effectiveLimit = Math.min(COMMUNITY_VIDEO_MAX_BYTES, bucketLimit);
+    if (!Number.isFinite(size) || size <= 0 || size > effectiveLimit) {
+      throw uploadError(`This video is larger than the current ${Math.floor(effectiveLimit / 1024 / 1024)}MB storage limit. Upgrade the Supabase Storage limit to enable hour-long uploads.`, 400);
+    }
+    const objectPath = `${user.id}/${Date.now()}-${crypto.randomUUID()}-${originalName}`;
+    const signed = await supabase.storage.from(COMMUNITY_MEDIA_BUCKET).createSignedUploadUrl(objectPath, { upsert: false });
+    if (signed.error || !signed.data?.token) throw signed.error || new Error("Could not create video upload ticket.");
+    const publicUrl = supabase.storage.from(COMMUNITY_MEDIA_BUCKET).getPublicUrl(objectPath).data.publicUrl;
+    const projectId = new URL(SUPABASE_URL).hostname.split(".")[0];
+    ok(reply, {
+      success: true,
+      bucket: COMMUNITY_MEDIA_BUCKET,
+      object_path: objectPath,
+      public_url: publicUrl,
+      upload_token: signed.data.token,
+      resumable_endpoint: `https://${projectId}.storage.supabase.co/storage/v1/upload/resumable`,
+      chunk_size: 6 * 1024 * 1024,
+      max_bytes: effectiveLimit,
+    });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+};
+app.post("/community/media/upload-ticket", communityMediaUploadTicketHandler);
+app.post("/api/community/media/upload-ticket", communityMediaUploadTicketHandler);
+
 function normalizeAddress(tags: Record<string, any> = {}) {
   const parts = [
     tags["addr:housenumber"],
@@ -2903,6 +2951,7 @@ app.get("/health", async (_req, reply) => {
       avatar_image_max_bytes: AVATAR_IMAGE_MAX_BYTES,
       catch_photo_max_bytes: CATCH_PHOTO_MAX_BYTES,
       community_media_max_bytes: COMMUNITY_MEDIA_MAX_BYTES,
+      community_video_max_bytes: COMMUNITY_VIDEO_MAX_BYTES,
       image_mime_types: [...IMAGE_UPLOAD_MIME_EXT.keys()],
       community_media_mime_types: [...COMMUNITY_MEDIA_MIME_EXT.keys()],
       strip_image_metadata: STRIP_IMAGE_UPLOAD_METADATA,
@@ -6259,6 +6308,7 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/admin/audit",
       "/saved-areas",
       "/community/posts",
+      "/community/media/upload-ticket",
       "/api/community/posts",
       "/community/posts/:id/like",
       "/api/community/posts/:id/like",
