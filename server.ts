@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-10_DURABLE_COMMUNITY_MEDIA";
+const BUILD_ID = "OC_BACKEND_2026-06-10_ADMIN_CONTROL_ROOM";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -5619,7 +5619,57 @@ app.get("/admin/users/:id", async (req, reply) => {
       .filter((row: any) => String(row.user_id) === selectedId || String(row.user_email || "").toLowerCase() === selectedEmail)
       .map((row: any) => ({ ...row, photo_url: makeAbsoluteMediaUrl(req, row.photo_url) }));
 
-    ok(reply, { success: true, admin: { id: admin.id, email: admin.email }, user, profile, catches });
+    const rewards = await rewardSummaryForUser({
+      id: selectedId,
+      email: user?.email || profile?.email || null,
+      isGuest: false,
+      user_metadata: user?.user_metadata || {},
+    }).catch(() => null);
+
+    ok(reply, { success: true, admin: { id: admin.id, email: admin.email }, user, profile, catches, rewards });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+});
+
+app.post("/admin/users/:id/rewards/adjust", async (req, reply) => {
+  try {
+    const admin = await requireAdminUser(req);
+    const userId = str((req.params as any)?.id);
+    const body = (req.body || {}) as any;
+    const points = Math.trunc(Number(body.points || 0));
+    const reason = str(body.reason, "").slice(0, 240);
+    const email = str(body.email, "") || null;
+    if (!userId) throw adminError("User id is required.", 400);
+    if (!Number.isFinite(points) || points === 0 || Math.abs(points) > 100000) {
+      throw adminError("Points adjustment must be between -100,000 and 100,000 and cannot be zero.", 400);
+    }
+    if (reason.length < 3) throw adminError("Add a short reason for the points adjustment.", 400);
+
+    const row = normalizeRewardLedger({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      user_email: email,
+      event_type: "admin_adjustment",
+      event_key: `admin_adjustment:${crypto.randomUUID()}`,
+      points,
+      title: points > 0 ? "OceanPoints added by OceanCore support" : "OceanPoints adjusted by OceanCore support",
+      source_type: "admin",
+      source_id: admin.id,
+      metadata: { reason, admin_email: admin.email },
+      status: "earned",
+      created_at: new Date().toISOString(),
+    });
+
+    if (supabase) {
+      const saved = await supabase.from(REWARD_LEDGER_TABLE).insert(row).select("id").single();
+      if (saved.error) throw saved.error;
+    } else {
+      const rows = await readLocalRewardLedger();
+      rows.push(row);
+      await writeLocalRewardLedger(rows);
+    }
+    await writeAuditLog(admin, "reward_points_adjusted", "user", userId, { points, reason });
+    const rewards = await rewardSummaryForUser({ id: userId, email, isGuest: false, user_metadata: {} });
+    ok(reply, { success: true, admin: { id: admin.id, email: admin.email }, adjustment: row, rewards });
   } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
 });
 
@@ -6201,6 +6251,7 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/admin/profiles",
       "/admin/system-health",
       "/admin/users/:id/status",
+      "/admin/users/:id/rewards/adjust",
       "/admin/users/:id/suspend",
       "/admin/users/:id/unsuspend",
       "/feedback",
