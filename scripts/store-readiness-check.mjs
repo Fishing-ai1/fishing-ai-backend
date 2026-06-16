@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const API_URL = (process.env.API_URL || "http://127.0.0.1:4000").replace(/\/+$/, "");
+const FRONTEND_URL = (process.env.FRONTEND_URL || API_URL).replace(/\/+$/, "");
+const FRONTEND_APP_PATH = process.env.FRONTEND_APP_PATH ?? (FRONTEND_URL === API_URL ? "/app" : "");
 const STRICT_STORE_CHECK = process.env.STRICT_STORE_CHECK === "true";
 const REVIEWER_EMAIL = process.env.REVIEWER_EMAIL || process.env.SMOKE_EMAIL || "";
 const REVIEWER_PASSWORD = process.env.REVIEWER_PASSWORD || process.env.SMOKE_PASSWORD || "";
@@ -29,13 +31,16 @@ const requiredFiles = [
   "APP_STORE_READINESS.md",
 ];
 
-const requiredUrls = [
-  "/app/",
-  "/app/manifest.webmanifest",
-  "/app/sw.js",
-  "/app/offline.html",
-  "/app/assets/native-config.js",
-  "/app/assets/icons/icon-512.png",
+const requiredFrontendUrls = [
+  `${FRONTEND_APP_PATH}/`,
+  `${FRONTEND_APP_PATH}/manifest.webmanifest`,
+  `${FRONTEND_APP_PATH}/sw.js`,
+  `${FRONTEND_APP_PATH}/offline.html`,
+  `${FRONTEND_APP_PATH}/assets/native-config.js`,
+  `${FRONTEND_APP_PATH}/assets/icons/icon-512.png`,
+];
+
+const requiredBackendUrls = [
   "/legal/privacy-policy",
   "/legal/terms-of-service",
   "/legal/account-deletion",
@@ -197,13 +202,18 @@ async function checkNative() {
 }
 
 async function checkUrls() {
-  for (const urlPath of requiredUrls) {
+  for (const urlPath of requiredFrontendUrls) {
+    const res = await fetch(`${FRONTEND_URL}${urlPath}`, { headers: { Accept: "text/html,application/json,*/*" } });
+    if (!res.ok) fail(`${urlPath}: frontend returned HTTP ${res.status}`);
+  }
+  for (const urlPath of requiredBackendUrls) {
     const res = await fetch(`${API_URL}${urlPath}`, { headers: { Accept: "text/html,application/json,*/*" } });
     if (!res.ok) fail(`${urlPath} returned HTTP ${res.status}`);
     const text = await res.text();
     if (urlPath.startsWith("/legal/") && !text.includes("OceanCore AI")) fail(`${urlPath} missing OceanCore text`);
   }
-  ok(`required URLs serve from ${API_URL}`);
+  ok(`required frontend URLs serve from ${FRONTEND_URL}`);
+  ok(`required backend URLs serve from ${API_URL}`);
 }
 
 async function checkBackendSecurity() {
