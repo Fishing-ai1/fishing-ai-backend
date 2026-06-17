@@ -5383,6 +5383,276 @@ async function adminUpdateCommunityPostHandler(req: any, reply: any) {
   }
 }
 
+function safetyWords(text: string) {
+  const lower = String(text || "").toLowerCase();
+  const matches: string[] = [];
+  const checks: Array<[string, RegExp]> = [
+    ["exact_location_risk", /\b(?:gps|coordinates?|mark|spot|pin|lat|lng|longitude|latitude)\b/i],
+    ["harassment_or_abuse", /\b(?:idiot|stupid|hate|kill|threat|fight|abuse)\b/i],
+    ["spam_or_scam", /\b(?:crypto|telegram|whatsapp|free money|investment|click here|http:\/\/|https:\/\/|www\.)\b/i],
+    ["illegal_or_unsafe", /\b(?:undersize|illegal|poach|no limit|closed season|drink drive|unsafe|hazard|danger)\b/i],
+  ];
+  for (const [label, pattern] of checks) if (pattern.test(lower)) matches.push(label);
+  return [...new Set(matches)];
+}
+
+function buildAdminSafetyFlag(source: string, id: string, text: string, extra: Record<string, any> = {}) {
+  const reasons = safetyWords(text);
+  if (!reasons.length && !extra.reported) return null;
+  const severity = reasons.includes("harassment_or_abuse") || reasons.includes("illegal_or_unsafe")
+    ? "high"
+    : reasons.includes("exact_location_risk") || extra.reported
+    ? "medium"
+    : "low";
+  return {
+    id: `${source}:${id}`,
+    source,
+    source_id: id,
+    severity,
+    reasons,
+    text: String(text || "").slice(0, 260),
+    ...extra,
+  };
+}
+
+async function listAdminCommunityComments(limit = 300) {
+  if (!supabase) return (await readLocalCommunityComments()).slice(-limit).reverse();
+  try {
+    const res = await supabase
+      .from("community_comments")
+      .select(COMMUNITY_COMMENT_SELECT)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (res.error) throw res.error;
+    return (res.data || []).map(normalizeCommunityComment);
+  } catch (e) {
+    console.warn("admin community comments list failed", e);
+    return [];
+  }
+}
+
+async function listAdminCommunityFollows(limit = 500) {
+  if (!supabase) return (await readLocalCommunityFollows()).slice(-limit).reverse();
+  try {
+    const res = await supabase
+      .from("community_follows")
+      .select("follower_id,following_id,created_at")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (res.error) throw res.error;
+    return res.data || [];
+  } catch (e) {
+    console.warn("admin community follows list failed", e);
+    return [];
+  }
+}
+
+async function adminSupportCenterHandler(req: any, reply: any) {
+  try {
+    const admin = await requireAdminUser(req);
+    const data = await getAdminData(1000);
+    const [feedback, audit, community, comments, reports, follows] = await Promise.all([
+      listFeedbackRows(300),
+      listAuditRows(150),
+      listCommunityPostsForUser(admin, "").catch(() => ({ posts: [] as CommunityPostRow[], storage: "unavailable" })),
+      listAdminCommunityComments(300),
+      supabase
+        ? supabase.from("community_reports").select(COMMUNITY_REPORT_SELECT).order("created_at", { ascending: false }).limit(300).then((r) => (r.data || []).map(normalizeCommunityReport)).catch(() => [])
+        : readLocalCommunityReports(),
+      listAdminCommunityFollows(500),
+    ]);
+
+    const profilesById = new Map((data.profiles || []).map((profile: any) => [String(profile.id), profile]));
+    const usersById = new Map((data.users || []).map((user: any) => [String(user.id), user]));
+    const posts = community.posts || [];
+    const postsById = new Map(posts.map((post) => [String(post.id), post]));
+    const openFeedback = feedback.filter((row: any) => String(row.status || "open") !== "closed");
+    const reportedPostIds = new Set(reports.filter((row: any) => String(row.status || "open") !== "closed").map((row: any) => String(row.post_id)));
+
+    const safetyFlags = [
+      ...posts.map((post) => buildAdminSafetyFlag("post", String(post.id), `${post.title || ""} ${post.caption || ""} ${post.general_area || ""}`, {
+        user_id: post.user_id,
+        user_email: post.user_email,
+        status: post.status,
+        reported: reportedPostIds.has(String(post.id)),
+        created_at: post.created_at,
+      })).filter(Boolean),
+      ...comments.map((comment) => buildAdminSafetyFlag("comment", String(comment.id), comment.body, {
+        post_id: comment.post_id,
+        user_id: comment.user_id,
+        user_email: comment.user_email,
+        status: comment.status,
+        created_at: comment.created_at,
+      })).filter(Boolean),
+    ].sort((a: any, b: any) => {
+      const rank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+      return (rank[b.severity] || 0) - (rank[a.severity] || 0) || Date.parse(String(b.created_at || "")) - Date.parse(String(a.created_at || ""));
+    });
+
+    const supportCases = openFeedback.slice(0, 100).map((row: any) => {
+      const userId = String(row.user_id || "");
+      const email = String(row.user_email || "");
+      const profile = profilesById.get(userId) || [...profilesById.values()].find((p: any) => String(p.email || "").toLowerCase() === email.toLowerCase()) || null;
+      const authUser = usersById.get(userId) || [...usersById.values()].find((u: any) => String(u.email || "").toLowerCase() === email.toLowerCase()) || null;
+      return {
+        id: row.id,
+        type: row.type,
+        status: row.status || "open",
+        priority: /upload|login|payment|delete|unsafe|abuse|video/i.test(`${row.type} ${row.message}`) ? "high" : "normal",
+        user_id: row.user_id || profile?.id || authUser?.id || null,
+        user_email: row.user_email || profile?.email || authUser?.email || null,
+        profile_name: profile?.full_name || profile?.username || null,
+        message: row.message,
+        page: row.page,
+        created_at: row.created_at,
+        last_sign_in_at: authUser?.last_sign_in_at || null,
+        account_status: profile?.account_status || "active",
+        plan: profile?.plan || "free",
+      };
+    });
+
+    const followerCounts = new Map<string, { user_id: string; followers: number; following: number }>();
+    for (const row of follows as any[]) {
+      const followerId = String(row.follower_id || "");
+      const followingId = String(row.following_id || "");
+      if (followerId) {
+        const entry = followerCounts.get(followerId) || { user_id: followerId, followers: 0, following: 0 };
+        entry.following += 1;
+        followerCounts.set(followerId, entry);
+      }
+      if (followingId) {
+        const entry = followerCounts.get(followingId) || { user_id: followingId, followers: 0, following: 0 };
+        entry.followers += 1;
+        followerCounts.set(followingId, entry);
+      }
+    }
+
+    const socialGraph = [...followerCounts.values()]
+      .map((row) => {
+        const profile = profilesById.get(row.user_id) as any;
+        const user = usersById.get(row.user_id) as any;
+        return {
+          ...row,
+          email: profile?.email || user?.email || null,
+          name: profile?.full_name || profile?.username || user?.email || row.user_id,
+          account_status: profile?.account_status || "active",
+        };
+      })
+      .sort((a, b) => b.followers - a.followers)
+      .slice(0, 50);
+
+    const moderationQueue = [
+      ...reports.map((report: any) => {
+        const post = postsById.get(String(report.post_id));
+        return {
+          queue_type: "reported_post",
+          id: report.id,
+          post_id: report.post_id,
+          status: report.status || "open",
+          reason: report.reason || "report",
+          notes: report.notes || null,
+          user_email: report.user_email || null,
+          post_title: post?.title || post?.species || "Community post",
+          post_status: post?.status || null,
+          caption: post?.caption || "",
+          created_at: report.created_at,
+        };
+      }),
+      ...comments.filter((comment) => String(comment.status || "active") !== "active").map((comment) => ({
+        queue_type: "held_comment",
+        id: comment.id,
+        post_id: comment.post_id,
+        status: comment.status,
+        reason: "held_comment",
+        user_email: comment.user_email || null,
+        body: comment.body,
+        created_at: comment.created_at,
+      })),
+    ].sort((a: any, b: any) => Date.parse(String(b.created_at || "")) - Date.parse(String(a.created_at || "")));
+
+    ok(reply, {
+      success: true,
+      admin: { id: admin.id, email: admin.email },
+      support_cases: supportCases,
+      moderation_queue: moderationQueue.slice(0, 150),
+      safety_flags: safetyFlags.slice(0, 150),
+      social_graph: socialGraph,
+      recent_follows: (follows as any[]).slice(0, 80),
+      message_safety: {
+        status: "not_enabled",
+        recommendation: "Enable direct messages only after mutual follow, report/block controls, AI moderation, and admin review of flagged conversations are live.",
+        required_controls: [
+          "Mutual-follow or approved-friend messaging",
+          "AI scan before message delivery",
+          "User block and report",
+          "Admin queue for flagged/reported messages only",
+          "Audit log for moderator access",
+          "Rate limits and spam detection",
+        ],
+      },
+      totals: {
+        open_support_cases: supportCases.length,
+        moderation_items: moderationQueue.length,
+        safety_flags: safetyFlags.length,
+        follows: (follows as any[]).length,
+      },
+      audit,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function adminUpdateCommunityReportHandler(req: any, reply: any) {
+  try {
+    const admin = await requireAdminUser(req);
+    const id = str((req.params as any)?.id);
+    const status = str((req.body as any)?.status, "reviewed").toLowerCase();
+    if (!["open", "reviewing", "reviewed", "closed"].includes(status)) throw adminError("Report status must be open, reviewing, reviewed, or closed.", 400);
+    const patch = { status, updated_at: new Date().toISOString() };
+    if (supabase) {
+      const saved = await supabase.from("community_reports").update(patch).eq("id", id).select(COMMUNITY_REPORT_SELECT).maybeSingle();
+      if (saved.error && (saved.error as any)?.code !== "PGRST116") throw saved.error;
+      await writeAuditLog(admin, "community_report_status_updated", "community_report", id, patch);
+      ok(reply, { success: true, report: saved.data ? normalizeCommunityReport(saved.data) : null });
+      return;
+    }
+    const rows = await readLocalCommunityReports();
+    const row = rows.find((item) => String(item.id) === id);
+    if (row) Object.assign(row, patch);
+    await writeLocalCommunityReports(rows);
+    await writeAuditLog(admin, "community_report_status_updated", "community_report", id, patch);
+    ok(reply, { success: true, report: row || null });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function adminUpdateCommunityCommentHandler(req: any, reply: any) {
+  try {
+    const admin = await requireAdminUser(req);
+    const id = str((req.params as any)?.id);
+    const status = str((req.body as any)?.status, "active").toLowerCase();
+    if (!["active", "held", "hidden", "deleted"].includes(status)) throw adminError("Comment status must be active, held, hidden, or deleted.", 400);
+    const patch = { status, updated_at: new Date().toISOString() };
+    if (supabase) {
+      const saved = await supabase.from("community_comments").update(patch).eq("id", id).select(COMMUNITY_COMMENT_SELECT).maybeSingle();
+      if (saved.error && (saved.error as any)?.code !== "PGRST116") throw saved.error;
+      await writeAuditLog(admin, "community_comment_status_updated", "community_comment", id, patch);
+      ok(reply, { success: true, comment: saved.data ? normalizeCommunityComment(saved.data) : null });
+      return;
+    }
+    const rows = await readLocalCommunityComments();
+    const row = rows.find((item) => String(item.id) === id);
+    if (row) Object.assign(row, patch);
+    await writeLocalCommunityComments(rows);
+    await writeAuditLog(admin, "community_comment_status_updated", "community_comment", id, patch);
+    ok(reply, { success: true, comment: row || null });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
 function activityStreak(rows: { created_at: string }[]) {
   const days = new Set(rows.map((row) => String(row.created_at || "").slice(0, 10)).filter(Boolean));
   let current = 0;
@@ -5546,6 +5816,9 @@ app.get("/community/dashboard", communityDashboardHandler);
 app.get("/api/community/dashboard", communityDashboardHandler);
 app.get("/admin/community/posts", adminCommunityPostsHandler);
 app.patch("/admin/community/posts/:id", adminUpdateCommunityPostHandler);
+app.get("/admin/support-center", adminSupportCenterHandler);
+app.patch("/admin/community/reports/:id", adminUpdateCommunityReportHandler);
+app.patch("/admin/community/comments/:id", adminUpdateCommunityCommentHandler);
 
 app.post("/feedback", async (req, reply) => {
   try {
@@ -6306,6 +6579,7 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/feedback",
       "/admin/feedback",
       "/admin/audit",
+      "/admin/support-center",
       "/saved-areas",
       "/community/posts",
       "/community/media/upload-ticket",
@@ -6320,6 +6594,8 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/api/community/posts/:id",
       "/admin/community/posts",
       "/admin/community/posts/:id",
+      "/admin/community/reports/:id",
+      "/admin/community/comments/:id",
       "/rewards/catalog",
       "/rewards/me",
       "/rewards/reconcile",
