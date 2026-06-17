@@ -78,12 +78,12 @@ const AI_FEEDBACK_TABLE = process.env.AI_FEEDBACK_TABLE || "ai_feedback";
 // Stripe billing / subscriptions. Put these in .env / Render, never in frontend.
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
-const STRIPE_PRICE_STARTER_MONTHLY = process.env.STRIPE_PRICE_STARTER_MONTHLY || "";
-const STRIPE_PRICE_STARTER_YEARLY = process.env.STRIPE_PRICE_STARTER_YEARLY || "";
-const STRIPE_PRICE_BASIC_MONTHLY = process.env.STRIPE_PRICE_BASIC_MONTHLY || "";
-const STRIPE_PRICE_BASIC_YEARLY = process.env.STRIPE_PRICE_BASIC_YEARLY || "";
-const STRIPE_PRICE_PRO_MONTHLY = process.env.STRIPE_PRICE_PRO_MONTHLY || "";
-const STRIPE_PRICE_PRO_YEARLY = process.env.STRIPE_PRICE_PRO_YEARLY || "";
+const STRIPE_PRICE_LITE_MONTHLY = process.env.STRIPE_PRICE_LITE_MONTHLY || process.env.STRIPE_PRICE_STARTER_MONTHLY || "";
+const STRIPE_PRICE_LITE_YEARLY = process.env.STRIPE_PRICE_LITE_YEARLY || process.env.STRIPE_PRICE_STARTER_YEARLY || "";
+const STRIPE_PRICE_PREMIUM_MONTHLY = process.env.STRIPE_PRICE_PREMIUM_MONTHLY || process.env.STRIPE_PRICE_PRO_MONTHLY || process.env.STRIPE_PRICE_BASIC_MONTHLY || "";
+const STRIPE_PRICE_PREMIUM_YEARLY = process.env.STRIPE_PRICE_PREMIUM_YEARLY || process.env.STRIPE_PRICE_PRO_YEARLY || process.env.STRIPE_PRICE_BASIC_YEARLY || "";
+const STRIPE_PRICE_CREW_MONTHLY = process.env.STRIPE_PRICE_CREW_MONTHLY || "";
+const STRIPE_PRICE_CREW_YEARLY = process.env.STRIPE_PRICE_CREW_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
 const FRONTEND_DIR = process.env.FRONTEND_DIR || path.resolve(process.cwd(), "../fishing-ai-frontend");
 const ALLOWED_ORIGINS = csvEnv(process.env.ALLOWED_ORIGINS || FRONTEND_URL || "");
@@ -114,7 +114,7 @@ const EFFECTIVE_ALLOWED_ORIGINS = Array.from(
   new Set([...DEFAULT_WEB_ORIGINS, ...ALLOWED_ORIGINS, ...NATIVE_APP_ORIGINS])
 );
 const ALLOW_NULL_ORIGIN = String(process.env.ALLOW_NULL_ORIGIN || "").toLowerCase() === "true";
-// During beta, admin can manually assign starter/basic/pro/founder without Stripe being active.
+// During beta, admin can manually assign lite/premium/crew/founder without Stripe being active.
 const BETA_MANUAL_PLAN_ACCESS = String(process.env.BETA_MANUAL_PLAN_ACCESS || "true").toLowerCase() !== "false";
 
 // Admin access: set ADMIN_EMAILS in Render to your own login email, comma-separated for multiple admins.
@@ -2924,9 +2924,7 @@ app.get("/health", async (_req, reply) => {
     geocode_countrycodes: GEOCODE_COUNTRYCODES || null,
     weather_api_key_alias_present: !!envValue("WEATHER_API_KEY"),
     stripe_configured: !!STRIPE_SECRET_KEY,
-    stripe_starter_monthly_configured: !!STRIPE_PRICE_STARTER_MONTHLY,
-    stripe_basic_monthly_configured: !!STRIPE_PRICE_BASIC_MONTHLY,
-    stripe_pro_monthly_configured: !!STRIPE_PRICE_PRO_MONTHLY,
+    stripe_prices_configured: stripePricesConfigured(),
     frontend_app_available: fs.existsSync(path.join(FRONTEND_DIR, "index.html")),
     frontend_app_path: "/app/",
     catches_table: CATCHES_TABLE,
@@ -2987,7 +2985,7 @@ app.get("/health", async (_req, reply) => {
       "fuel_logs",
       "subscription_status",
       "stripe_checkout",
-      "free_starter_basic_pro_plans",
+      "free_lite_premium_crew_plans",
       "oceancore_rewards",
       "oceanpoints_ledger",
       "reward_levels",
@@ -4030,18 +4028,33 @@ app.get("/ai/chat/smart", async (req, reply) => {
 });
 
 // ============================================================
-// Billing / subscriptions — Free with ads, Starter, Basic, Pro
+// Billing / subscriptions — Free, Lite, Premium, Crew
 // ============================================================
-type PlanKey = "free" | "starter" | "basic" | "pro" | "founder";
+type PlanKey = "free" | "lite" | "premium" | "crew" | "founder";
 type BillingInterval = "monthly" | "yearly";
 
 const PLAN_CATALOG: Record<PlanKey, any> = {
-  free: { key: "free", name: "Free", price_label: "A$0", ads_enabled: true, ai_daily_limit: 5, saved_area_limit: 3, catch_card_level: "basic", features: ["Catch log", "Basic AI limits", "Basic map and conditions", "Catch cards with OceanCore branding", "Ads shown"] },
-  starter: { key: "starter", name: "Starter", price_label: "A$3.99/mo", ads_enabled: false, ai_daily_limit: 20, saved_area_limit: 8, catch_card_level: "standard", features: ["No ads", "20 AI questions/day", "8 saved areas", "Standard catch cards", "Basic trip planning"] },
-  basic: { key: "basic", name: "Basic", price_label: "A$7.99/mo", ads_enabled: false, ai_daily_limit: 50, saved_area_limit: 20, catch_card_level: "full", features: ["No ads", "50 AI questions/day", "20 saved areas", "Full catch cards", "Trip history"] },
-  pro: { key: "pro", name: "Pro", price_label: "A$15.99/mo", ads_enabled: false, ai_daily_limit: 200, saved_area_limit: 9999, catch_card_level: "advanced", features: ["No ads", "High-limit AI", "Advanced catch insights", "Pattern insights", "Early Boat AI/sensor access"] },
-  founder: { key: "founder", name: "Founder", price_label: "Internal", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "advanced", features: ["Full access", "Admin/founder controls", "No ads", "All beta features"] },
+  free: { key: "free", product_id: "oceancore_free", name: "Free", tagline: "Start logging and join the community", monthly_price_aud: 0, yearly_price_aud: 0, price_label: "A$0", ads_enabled: true, ai_daily_limit: 5, saved_area_limit: 3, catch_card_level: "basic", catch_log: "limited/basic", ai: "limited", live_zones: false, delayed_zones: false, game_access: "demo", rewards: "basic", crew: false, features: ["Community feed access", "Upload catches", "Basic catch log", "Basic weather/tide preview", "Limited AI questions", "Demo OceanCore Offshore access", "Ads enabled", "Basic rewards points"], excluded_features: ["Live fishing zones", "Advanced AI pattern memory", "Premium game events", "Crew sharing", "Premium rewards"] },
+  lite: { key: "lite", product_ids: { monthly: "oceancore_lite_monthly", yearly: "oceancore_lite_yearly" }, name: "OceanCore Lite", badge: "Low-cost starter", tagline: "Go ad-light and unlock basic AI", monthly_price_aud: 4.99, yearly_price_aud: 39.99, price_label: "A$4.99/mo", ads_enabled: false, rewarded_ads_allowed: true, ai_daily_limit: 25, saved_area_limit: 12, catch_card_level: "standard", catch_log: "unlimited", ai: "basic/limited", live_zones: false, delayed_zones: true, game_access: "basic", rewards: "basic", crew: false, features: ["No banner ads", "Unlimited catch log", "Basic AI assistant", "Limited AI predictions", "Basic weather/tide tools", "Basic size/legal info", "Basic OceanCore Offshore access", "Delayed fishing zones", "Community Lite badge", "Private catch history"], excluded_features: ["Full live fishing zones", "Full AI pattern memory", "Advanced trip predictions", "Crew sharing", "Premium rewards", "Creator tools"] },
+  premium: { key: "premium", product_ids: { monthly: "oceancore_premium_monthly", yearly: "oceancore_premium_yearly" }, name: "OceanCore Premium", badge: "Most Popular", tagline: "Unlock the full OceanCore fishing brain", monthly_price_aud: 12.99, yearly_price_aud: 99.99, price_label: "A$12.99/mo", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "advanced", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "premium", crew: false, features: ["Everything in Lite", "Full AI fishing assistant", "Full personal catch memory", "Live OceanCore fishing zones", "Best time/species predictions", "Advanced tide/wind/moon pattern analysis", "AI trip planner", "Full OceanCore Offshore access", "Premium game events", "Voucher/giveaway access", "Advanced catch stats"] },
+  crew: { key: "crew", product_ids: { monthly: "oceancore_crew_monthly", yearly: "oceancore_crew_yearly" }, name: "OceanCore Crew", tagline: "For boats, families and fishing mates", monthly_price_aud: 24.99, yearly_price_aud: 219.99, price_label: "A$24.99/mo", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "crew", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "crew/premium", crew: true, users_included: "3 to 5", features: ["Everything in Premium", "3 to 5 users included", "Shared boat profile", "Shared catch log", "Shared trip history", "Shared private marks", "Crew leaderboard", "Shared OceanCore Offshore rewards", "Shared trip planning", "Crew badge"] },
+  founder: { key: "founder", name: "Founder", price_label: "Internal", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "founder", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "crew/premium", crew: true, users_included: "3 to 5", features: ["Full access", "Admin/founder controls", "No ads", "All beta features"] },
 };
+
+const PUBLIC_PLAN_ORDER: PlanKey[] = ["free", "lite", "premium", "crew"];
+const PAID_PLAN_KEYS: PlanKey[] = ["lite", "premium", "crew"];
+
+function normalizePlanKey(plan: any): PlanKey {
+  const p = String(plan || "free").toLowerCase();
+  if (p === "starter") return "lite";
+  if (p === "basic" || p === "pro") return "premium";
+  if (p === "lite" || p === "premium" || p === "crew" || p === "founder") return p as PlanKey;
+  return "free";
+}
+
+function publicPlanCatalog() {
+  return Object.fromEntries(PUBLIC_PLAN_ORDER.map((key) => [key, PLAN_CATALOG[key]]));
+}
 
 function isPaidStatus(status: any) {
   const s = String(status || "").toLowerCase();
@@ -4050,23 +4063,23 @@ function isPaidStatus(status: any) {
 
 function effectivePlanFromProfile(profile: any = {}): PlanKey {
   const appRole = String(profile.app_role || "").toLowerCase();
-  const plan = String(profile.plan || "free").toLowerCase() as PlanKey;
+  const plan = normalizePlanKey(profile.plan);
   const status = String(profile.subscription_status || "none").toLowerCase();
   if (appRole === "admin" || appRole === "founder" || plan === "founder") return "founder";
 
-  // Beta mode: lets you manually assign Starter/Basic/Pro in Admin without Stripe.
+  // Beta mode: lets you manually assign Lite/Premium/Crew in Admin without Stripe.
   // When Stripe goes live, set BETA_MANUAL_PLAN_ACCESS=false if you want paid plans
   // to require subscription_status active/trial.
-  if (BETA_MANUAL_PLAN_ACCESS && ["starter", "basic", "pro"].includes(plan)) return plan;
+  if (BETA_MANUAL_PLAN_ACCESS && PAID_PLAN_KEYS.includes(plan)) return plan;
 
-  if (["starter", "basic", "pro"].includes(plan) && isPaidStatus(status)) return plan;
+  if (PAID_PLAN_KEYS.includes(plan) && isPaidStatus(status)) return plan;
   return "free";
 }
 
 function getPlanEntitlements(profile: any = {}) {
   const effective_plan = effectivePlanFromProfile(profile);
   const base = PLAN_CATALOG[effective_plan] || PLAN_CATALOG.free;
-  return { effective_plan, ads_enabled: base.ads_enabled, ai_daily_limit: base.ai_daily_limit, saved_area_limit: base.saved_area_limit, catch_card_level: base.catch_card_level, features: base.features };
+  return { effective_plan, ads_enabled: base.ads_enabled, rewarded_ads_allowed: !!base.rewarded_ads_allowed, ai_daily_limit: base.ai_daily_limit, saved_area_limit: base.saved_area_limit, catch_card_level: base.catch_card_level, catch_log: base.catch_log, ai: base.ai, live_zones: !!base.live_zones, delayed_zones: !!base.delayed_zones, game_access: base.game_access, rewards: base.rewards, crew: !!base.crew, users_included: base.users_included || null, features: base.features };
 }
 
 function todayUsageKey() {
@@ -4143,22 +4156,22 @@ async function enforceAiLimitOrThrow(user: AuthUser) {
 }
 
 function stripePriceFor(plan: string, interval: string) {
-  const p = String(plan || "").toLowerCase();
+  const p = normalizePlanKey(plan);
   const i = String(interval || "monthly").toLowerCase();
-  if (p === "starter" && i === "yearly") return STRIPE_PRICE_STARTER_YEARLY;
-  if (p === "starter") return STRIPE_PRICE_STARTER_MONTHLY;
-  if (p === "basic" && i === "yearly") return STRIPE_PRICE_BASIC_YEARLY;
-  if (p === "basic") return STRIPE_PRICE_BASIC_MONTHLY;
-  if (p === "pro" && i === "yearly") return STRIPE_PRICE_PRO_YEARLY;
-  if (p === "pro") return STRIPE_PRICE_PRO_MONTHLY;
+  if (p === "lite" && i === "yearly") return STRIPE_PRICE_LITE_YEARLY;
+  if (p === "lite") return STRIPE_PRICE_LITE_MONTHLY;
+  if (p === "premium" && i === "yearly") return STRIPE_PRICE_PREMIUM_YEARLY;
+  if (p === "premium") return STRIPE_PRICE_PREMIUM_MONTHLY;
+  if (p === "crew" && i === "yearly") return STRIPE_PRICE_CREW_YEARLY;
+  if (p === "crew") return STRIPE_PRICE_CREW_MONTHLY;
   return "";
 }
 
 function stripePlanFromPrice(priceId: string) {
   if (!priceId) return "free";
-  if ([STRIPE_PRICE_STARTER_MONTHLY, STRIPE_PRICE_STARTER_YEARLY].includes(priceId)) return "starter";
-  if ([STRIPE_PRICE_BASIC_MONTHLY, STRIPE_PRICE_BASIC_YEARLY].includes(priceId)) return "basic";
-  if ([STRIPE_PRICE_PRO_MONTHLY, STRIPE_PRICE_PRO_YEARLY].includes(priceId)) return "pro";
+  if ([STRIPE_PRICE_LITE_MONTHLY, STRIPE_PRICE_LITE_YEARLY].includes(priceId)) return "lite";
+  if ([STRIPE_PRICE_PREMIUM_MONTHLY, STRIPE_PRICE_PREMIUM_YEARLY].includes(priceId)) return "premium";
+  if ([STRIPE_PRICE_CREW_MONTHLY, STRIPE_PRICE_CREW_YEARLY].includes(priceId)) return "crew";
   return "free";
 }
 
@@ -4200,9 +4213,9 @@ async function findUserIdByStripeCustomer(customerId: string) {
 }
 
 async function updateBillingFields(userId: string, patch: Record<string, any>) {
-  const plan = String(patch.plan || "").toLowerCase();
+  const plan = normalizePlanKey(patch.plan);
   const catalog = (PLAN_CATALOG as any)[plan] || null;
-  const enriched = { ...patch, ...(catalog ? { ads_enabled: catalog.ads_enabled, ai_daily_limit: catalog.ai_daily_limit, saved_area_limit: catalog.saved_area_limit, catch_card_level: catalog.catch_card_level } : {}), updated_at: new Date().toISOString() };
+  const enriched = { ...patch, plan, ...(catalog ? { ads_enabled: catalog.ads_enabled, ai_daily_limit: catalog.ai_daily_limit, saved_area_limit: catalog.saved_area_limit, catch_card_level: catalog.catch_card_level } : {}), updated_at: new Date().toISOString() };
   if (!supabase) { const existing = normalizeProfile(mem.profiles.get(userId) || { id: userId }); const next = normalizeProfile({ ...existing, ...enriched, id: userId }); mem.profiles.set(userId, next); return next; }
   const saved = await supabase.from(PROFILES_TABLE).upsert({ id: userId, ...enriched }, { onConflict: "id" }).select("id,email,app_role,plan,subscription_status,account_status,stripe_customer_id,stripe_subscription_id,subscription_current_period_end,subscription_cancel_at_period_end,ads_enabled,ai_daily_limit,saved_area_limit,catch_card_level,updated_at").single();
   if (saved.error) throw saved.error;
@@ -4218,6 +4231,17 @@ function stripeStatusToAppStatus(status: string) {
   return s || "none";
 }
 
+function stripePricesConfigured() {
+  return {
+    lite_monthly: !!STRIPE_PRICE_LITE_MONTHLY,
+    lite_yearly: !!STRIPE_PRICE_LITE_YEARLY,
+    premium_monthly: !!STRIPE_PRICE_PREMIUM_MONTHLY,
+    premium_yearly: !!STRIPE_PRICE_PREMIUM_YEARLY,
+    crew_monthly: !!STRIPE_PRICE_CREW_MONTHLY,
+    crew_yearly: !!STRIPE_PRICE_CREW_YEARLY,
+  };
+}
+
 function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) {
   if (!STRIPE_WEBHOOK_SECRET) return true;
   const parts = Object.fromEntries(String(signatureHeader || "").split(",").map((part) => { const [k, ...rest] = part.split("="); return [k, rest.join("=")]; }));
@@ -4229,16 +4253,16 @@ function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) 
   try { return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(expected)); } catch { return false; }
 }
 
-app.get("/billing/plans", async (_req, reply) => { ok(reply, { success: true, plans: PLAN_CATALOG, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: { starter_monthly: !!STRIPE_PRICE_STARTER_MONTHLY, starter_yearly: !!STRIPE_PRICE_STARTER_YEARLY, basic_monthly: !!STRIPE_PRICE_BASIC_MONTHLY, basic_yearly: !!STRIPE_PRICE_BASIC_YEARLY, pro_monthly: !!STRIPE_PRICE_PRO_MONTHLY, pro_yearly: !!STRIPE_PRICE_PRO_YEARLY } }); });
+app.get("/billing/plans", async (_req, reply) => { ok(reply, { success: true, plans: publicPlanCatalog(), plan_order: PUBLIC_PLAN_ORDER, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured() }); });
 
-app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: { starter_monthly: !!STRIPE_PRICE_STARTER_MONTHLY, starter_yearly: !!STRIPE_PRICE_STARTER_YEARLY, basic_monthly: !!STRIPE_PRICE_BASIC_MONTHLY, basic_yearly: !!STRIPE_PRICE_BASIC_YEARLY, pro_monthly: !!STRIPE_PRICE_PRO_MONTHLY, pro_yearly: !!STRIPE_PRICE_PRO_YEARLY }, plans: PLAN_CATALOG }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(), plans: publicPlanCatalog(), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 app.get("/billing/usage", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const ai_usage = await getAiUsageStatus(user, profile); ok(reply, { success: true, ai_usage, entitlements: ai_usage.entitlements }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
-app.post("/billing/checkout", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const body = (req.body || {}) as any; const plan = String(body.plan || "").toLowerCase(); const interval = String(body.interval || "monthly").toLowerCase() as BillingInterval; if (!["starter", "basic", "pro"].includes(plan)) throw new Error("Choose starter, basic or pro plan."); const priceId = stripePriceFor(plan, interval); if (!priceId) throw new Error(`Stripe price ID missing for ${plan} ${interval}. Add it to backend .env.`); const profile = await getBillingProfile(user); const base = getFrontendBaseUrl(req); const params: Record<string, any> = { mode: "subscription", "line_items[0][price]": priceId, "line_items[0][quantity]": 1, success_url: `${base}/?billing=success&plan=${encodeURIComponent(plan)}`, cancel_url: `${base}/?billing=cancelled`, client_reference_id: user.id, "metadata[user_id]": user.id, "metadata[email]": user.email || "", "metadata[plan]": plan, "metadata[interval]": interval, "subscription_data[metadata][user_id]": user.id, "subscription_data[metadata][email]": user.email || "", "subscription_data[metadata][plan]": plan, "subscription_data[metadata][interval]": interval, allow_promotion_codes: "true" }; if (profile.stripe_customer_id) params.customer = profile.stripe_customer_id; else if (user.email) params.customer_email = user.email; const session = await stripeRequest("/checkout/sessions", params); ok(reply, { success: true, url: session.url, id: session.id }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.post("/billing/checkout", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const body = (req.body || {}) as any; const plan = normalizePlanKey(body.plan); const interval = String(body.interval || "monthly").toLowerCase() as BillingInterval; if (!PAID_PLAN_KEYS.includes(plan)) throw new Error("Choose Lite, Premium or Crew plan."); const priceId = stripePriceFor(plan, interval); if (!priceId) throw new Error(`Stripe price ID missing for ${plan} ${interval}. Add the new OceanCore price IDs to backend .env.`); const profile = await getBillingProfile(user); const base = getFrontendBaseUrl(req); const params: Record<string, any> = { mode: "subscription", "line_items[0][price]": priceId, "line_items[0][quantity]": 1, success_url: `${base}/?billing=success&plan=${encodeURIComponent(plan)}`, cancel_url: `${base}/?billing=cancelled`, client_reference_id: user.id, "metadata[user_id]": user.id, "metadata[email]": user.email || "", "metadata[plan]": plan, "metadata[interval]": interval, "metadata[product_id]": PLAN_CATALOG[plan]?.product_ids?.[interval] || "", "subscription_data[metadata][user_id]": user.id, "subscription_data[metadata][email]": user.email || "", "subscription_data[metadata][plan]": plan, "subscription_data[metadata][interval]": interval, "subscription_data[metadata][product_id]": PLAN_CATALOG[plan]?.product_ids?.[interval] || "", allow_promotion_codes: "true" }; if (profile.stripe_customer_id) params.customer = profile.stripe_customer_id; else if (user.email) params.customer_email = user.email; const session = await stripeRequest("/checkout/sessions", params); ok(reply, { success: true, url: session.url, id: session.id, product_id: PLAN_CATALOG[plan]?.product_ids?.[interval] || null }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
 app.post("/billing/portal", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); if (!profile.stripe_customer_id) throw new Error("No Stripe customer found yet. Upgrade first, then billing portal will be available."); const base = getFrontendBaseUrl(req); const session = await stripeRequest("/billing_portal/sessions", { customer: profile.stripe_customer_id, return_url: `${base}/?billing=portal` }); ok(reply, { success: true, url: session.url }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
-app.post("/stripe/webhook", async (req: any, reply) => { try { const rawBody = String(req.rawBody || JSON.stringify(req.body || {})); const sig = String(req.headers?.["stripe-signature"] || ""); if (!verifyStripeWebhookSignature(rawBody, sig)) { reply.code(400).send({ success: false, error: "Invalid Stripe signature" }); return; } const event = req.body || {}; const type = String(event.type || ""); const obj = event.data?.object || {}; if (type === "checkout.session.completed") { const userId = String(obj.metadata?.user_id || obj.client_reference_id || ""); const plan = String(obj.metadata?.plan || "free").toLowerCase(); if (userId && ["starter", "basic", "pro"].includes(plan)) { await updateBillingFields(userId, { plan, subscription_status: "active", stripe_customer_id: obj.customer || null, stripe_subscription_id: obj.subscription || null }); } } if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) { const customerId = String(obj.customer || ""); const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId); if (userId) { let plan = String(obj.metadata?.plan || "").toLowerCase(); if (!["starter", "basic", "pro"].includes(plan)) plan = stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || "")); const isDeleted = type === "customer.subscription.deleted"; const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none"); await updateBillingFields(userId, { plan: isDeleted ? "free" : plan, subscription_status: status, stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null, subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null, subscription_cancel_at_period_end: !!obj.cancel_at_period_end }); } } ok(reply, { received: true }); } catch (e) { fail(reply, e, 400); } });
+app.post("/stripe/webhook", async (req: any, reply) => { try { const rawBody = String(req.rawBody || JSON.stringify(req.body || {})); const sig = String(req.headers?.["stripe-signature"] || ""); if (!verifyStripeWebhookSignature(rawBody, sig)) { reply.code(400).send({ success: false, error: "Invalid Stripe signature" }); return; } const event = req.body || {}; const type = String(event.type || ""); const obj = event.data?.object || {}; if (type === "checkout.session.completed") { const userId = String(obj.metadata?.user_id || obj.client_reference_id || ""); const plan = normalizePlanKey(obj.metadata?.plan || "free"); if (userId && PAID_PLAN_KEYS.includes(plan)) { await updateBillingFields(userId, { plan, subscription_status: "active", stripe_customer_id: obj.customer || null, stripe_subscription_id: obj.subscription || null }); } } if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) { const customerId = String(obj.customer || ""); const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId); if (userId) { let plan = normalizePlanKey(obj.metadata?.plan || ""); if (!PAID_PLAN_KEYS.includes(plan)) plan = normalizePlanKey(stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || ""))); const isDeleted = type === "customer.subscription.deleted"; const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none"); await updateBillingFields(userId, { plan: isDeleted ? "free" : plan, subscription_status: status, stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null, subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null, subscription_cancel_at_period_end: !!obj.cancel_at_period_end }); } } ok(reply, { received: true }); } catch (e) { fail(reply, e, 400); } });
 
 // ============================================================
 // Admin / dev dashboard routes
@@ -4382,10 +4406,11 @@ async function listFeedbackRows(limit = 100) {
 }
 
 async function upsertProfileAdminPatch(userId: string, patch: Record<string, any>) {
-  const planKey = String(patch.plan || "").toLowerCase();
+  const planKey = normalizePlanKey(patch.plan);
   const planDefaults = (PLAN_CATALOG as any)[planKey] || null;
   const enrichedPatch = {
     ...patch,
+    plan: planKey,
     ...(planDefaults ? {
       ads_enabled: planDefaults.ads_enabled,
       ai_daily_limit: planDefaults.ai_daily_limit,
@@ -4427,7 +4452,7 @@ function buildSystemHealth() {
     weather_api_key_alias_present: !!envValue("WEATHER_API_KEY"),
     stripe_configured: !!STRIPE_SECRET_KEY,
     beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS,
-    stripe_prices_configured: { starter_monthly: !!STRIPE_PRICE_STARTER_MONTHLY, starter_yearly: !!STRIPE_PRICE_STARTER_YEARLY, basic_monthly: !!STRIPE_PRICE_BASIC_MONTHLY, basic_yearly: !!STRIPE_PRICE_BASIC_YEARLY, pro_monthly: !!STRIPE_PRICE_PRO_MONTHLY, pro_yearly: !!STRIPE_PRICE_PRO_YEARLY },
+    stripe_prices_configured: stripePricesConfigured(),
     admin_enabled: ADMIN_EMAILS.length > 0 || ADMIN_USER_IDS.length > 0,
     tables: {
       profiles: PROFILES_TABLE,
@@ -5867,7 +5892,7 @@ app.get("/admin/overview", async (req, reply) => {
     const audit = await listAuditRows(50);
     const profiles = data.profiles || [];
     const suspended = (profiles as any[]).filter((p) => String(p.account_status || "active") === "suspended").length;
-    const proUsers = (profiles as any[]).filter((p) => ["starter", "basic", "pro", "founder", "premium"].includes(String(p.plan || "").toLowerCase())).length;
+    const proUsers = (profiles as any[]).filter((p) => ["lite", "premium", "crew", "founder"].includes(normalizePlanKey(p.plan))).length;
     ok(reply, {
       success: true,
       admin: { id: admin.id, email: admin.email },
@@ -6016,7 +6041,7 @@ app.patch("/admin/profiles/:id", async (req, reply) => {
       avatar_url: str(body.avatar_url, "") || null,
       legal_version: str(body.legal_version, LEGAL_VERSION),
       app_role: str(body.app_role, "") || null,
-      plan: str(body.plan, "free") || "free",
+      plan: normalizePlanKey(body.plan),
       subscription_status: str(body.subscription_status, "none") || "none",
       account_status: str(body.account_status, "active") || "active",
       admin_notes: str(body.admin_notes, "") || null,
