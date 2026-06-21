@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-10_RESUMABLE_LONG_VIDEO";
+const BUILD_ID = "OC_BACKEND_2026-06-22_CORS_PREFLIGHT_FIX";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -640,8 +640,13 @@ app.register(cors, {
   origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type", "Accept"],
+  allowedHeaders: ["Authorization", "Content-Type", "Accept", "X-Requested-With"],
   exposedHeaders: ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+});
+
+app.addHook("onRequest", async (req, reply) => {
+  if (req.method !== "OPTIONS") return;
+  reply.code(204).send();
 });
 
 app.addHook("onRequest", async (req, reply) => {
