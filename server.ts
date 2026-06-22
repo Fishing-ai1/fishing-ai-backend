@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-22_CORS_PREFLIGHT_FIX";
+const BUILD_ID = "OC_BACKEND_2026-06-22_SATELLITE_HEATMAP";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -97,6 +97,13 @@ const RATE_LIMITS_ENABLED = String(process.env.RATE_LIMITS || "true").toLowerCas
 const GEOCODE_SEARCH_URL = envValue("GEOCODE_SEARCH_URL") || "https://nominatim.openstreetmap.org/search";
 const GEOCODE_COUNTRYCODES = envValue("GEOCODE_COUNTRYCODES");
 const BODY_LIMIT_BYTES = Number(process.env.BODY_LIMIT_BYTES || 60 * 1024 * 1024);
+const SATELLITE_HEATMAP_ENABLED = String(process.env.SATELLITE_HEATMAP_ENABLED || "true").toLowerCase() !== "false";
+const SATELLITE_TIMEOUT_MS = Number(process.env.SATELLITE_TIMEOUT_MS || 9000);
+const SATELLITE_CACHE_MS = Number(process.env.SATELLITE_CACHE_MS || 30 * 60 * 1000);
+const SATELLITE_SST_URL_TEMPLATE = envValue("SATELLITE_SST_URL_TEMPLATE") ||
+  "https://coastwatch.noaa.gov/erddap/griddap/jplMURSST41.json?analysed_sst[(last)][({lat})][({lng})]";
+const SATELLITE_CHLORO_URL_TEMPLATE = envValue("SATELLITE_CHLORO_URL_TEMPLATE") ||
+  "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPVIIRSchlanomdifDaily.json?chlor_a_diff[(last)][(0.0)][({lat})][({lng})]";
 const DEFAULT_NATIVE_APP_ORIGINS = [
   "capacitor://localhost",
   "ionic://localhost",
@@ -2925,6 +2932,9 @@ app.get("/health", async (_req, reply) => {
     openai: !!openai,
     windy_point_forecast_configured: !!WINDY_POINT_FORECAST_KEY,
     windy_key_source: WINDY_KEY_SOURCE,
+    satellite_heatmap_configured: SATELLITE_HEATMAP_ENABLED,
+    satellite_sst_template_configured: !!SATELLITE_SST_URL_TEMPLATE,
+    satellite_chlorophyll_template_configured: !!SATELLITE_CHLORO_URL_TEMPLATE,
     geocode_search_configured: !!GEOCODE_SEARCH_URL,
     geocode_countrycodes: GEOCODE_COUNTRYCODES || null,
     weather_api_key_alias_present: !!envValue("WEATHER_API_KEY"),
@@ -3768,6 +3778,25 @@ app.get("/marine/forecast", marineHandler);
 app.get("/api/marine/forecast", marineHandler);
 app.get("/weather/marine", marineHandler);
 app.get("/api/weather/marine", marineHandler);
+
+const satelliteHeatmapHandler = async (req: any, reply: any) => {
+  try {
+    const lat = num(req.query?.lat);
+    const lng = num(req.query?.lng);
+    const radiusKm = clamp(Number(req.query?.radius_km || 35), 5, 120);
+    const species = str(req.query?.species || "pelagics", "pelagics");
+    if (lat == null || lng == null) {
+      reply.code(400).send({ success: false, error: "lat and lng are required" });
+      return;
+    }
+    ok(reply, await buildSatelliteHeatmap({ lat, lng, radiusKm, species }));
+  } catch (e) {
+    fail(reply, e);
+  }
+};
+
+app.get("/satellite/heatmap", satelliteHeatmapHandler);
+app.get("/api/satellite/heatmap", satelliteHeatmapHandler);
 
 const speciesDetectHandler = async (req: any, reply: any) => {
   try {
@@ -4851,6 +4880,152 @@ async function readLocalCommunityPosts(): Promise<CommunityPostRow[]> {
   } catch {
     return mem.communityPosts;
   }
+}
+
+const satelliteHeatmapCache = new Map<string, { expiresAt: number; payload: any }>();
+
+function satelliteTemplateUrl(template: string, lat: number, lng: number) {
+  return template
+    .replaceAll("{lat}", String(Number(lat.toFixed(4))))
+    .replaceAll("{lng}", String(Number(lng.toFixed(4))))
+    .replaceAll("{lon}", String(Number(lng.toFixed(4))));
+}
+
+async function fetchSatelliteValue(template: string, lat: number, lng: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, SATELLITE_TIMEOUT_MS));
+  try {
+    const res = await fetch(satelliteTemplateUrl(template, lat, lng), {
+      headers: { Accept: "application/json", "User-Agent": "OceanCoreAI/1.0 satellite heatmap" },
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`satellite request failed (${res.status})`);
+    const json = text ? JSON.parse(text) : null;
+    const rows = json?.table?.rows;
+    if (Array.isArray(rows)) {
+      for (const row of rows) {
+        const values = Array.isArray(row) ? row : [];
+        const lastNumber = [...values].reverse().find((value) => Number.isFinite(Number(value)));
+        if (lastNumber != null) return Number(lastNumber);
+      }
+    }
+    const flat = JSON.stringify(json || {}).match(/-?\d+(?:\.\d+)?/g) || [];
+    const value = flat.map(Number).reverse().find((x) => Number.isFinite(x));
+    return value ?? null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function kmOffsetLatLng(lat: number, lng: number, northKm: number, eastKm: number) {
+  const dLat = northKm / 111.32;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const dLng = eastKm / Math.max(20, 111.32 * Math.max(0.18, Math.abs(cosLat)));
+  return { lat: lat + dLat, lng: lng + dLng };
+}
+
+function satelliteSpeciesProfile(species: string) {
+  const key = String(species || "pelagics").toLowerCase();
+  if (/snapper|reef/.test(key)) return { family: "reef", sstMin: 18, sstMax: 25, sstIdeal: 21.5, chloroWeight: 0.9 };
+  if (/flathead|whiting|bream/.test(key)) return { family: "inshore", sstMin: 18, sstMax: 28, sstIdeal: 23, chloroWeight: 0.6 };
+  return { family: "pelagic", sstMin: 20, sstMax: 29, sstIdeal: 24, chloroWeight: 1.25 };
+}
+
+function scoreSatelliteCell(input: { species: string; sstC: number | null; chloroSignal: number | null; distanceKm: number }) {
+  const profile = satelliteSpeciesProfile(input.species);
+  let score = 38;
+  const reasons: string[] = [];
+
+  if (input.sstC == null) {
+    reasons.push("SST missing");
+  } else {
+    const tempDistance = Math.abs(input.sstC - profile.sstIdeal);
+    const tempScore = Math.max(-12, 28 - tempDistance * 8);
+    score += tempScore;
+    reasons.push(`SST ${Number(input.sstC.toFixed(1))}C`);
+  }
+
+  if (input.chloroSignal == null) {
+    reasons.push("chlorophyll missing/cloud gap");
+  } else {
+    const productive = Math.max(-10, Math.min(20, input.chloroSignal * 12 * profile.chloroWeight));
+    score += productive;
+    reasons.push(`chlorophyll signal ${Number(input.chloroSignal.toFixed(2))}`);
+  }
+
+  score += Math.max(-8, 7 - input.distanceKm * 0.35);
+  return { score: clamp(Math.round(score), 0, 100), reasons };
+}
+
+async function buildSatelliteHeatmap(input: { lat: number; lng: number; radiusKm: number; species: string }) {
+  if (!SATELLITE_HEATMAP_ENABLED) throw new Error("Satellite heat map is disabled on this backend.");
+  const radiusKm = clamp(Number(input.radiusKm || 35), 5, 120);
+  const species = str(input.species || "pelagics", "pelagics").toLowerCase();
+  const cacheKey = [input.lat.toFixed(2), input.lng.toFixed(2), radiusKm, species].join(":");
+  const cached = satelliteHeatmapCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return { ...cached.payload, cached: true };
+
+  const offsets = [-0.66, 0, 0.66];
+  const cellRadiusKm = Math.max(3, radiusKm / 3.8);
+  const cells = offsets.flatMap((north) =>
+    offsets.map((east) => {
+      const northKm = north * radiusKm;
+      const eastKm = east * radiusKm;
+      const point = kmOffsetLatLng(input.lat, input.lng, northKm, eastKm);
+      return { ...point, northKm, eastKm, distanceKm: Math.sqrt(northKm ** 2 + eastKm ** 2) };
+    })
+  );
+
+  const sampled = await Promise.all(cells.map(async (cell) => {
+    const [sst, chloro] = await Promise.allSettled([
+      fetchSatelliteValue(SATELLITE_SST_URL_TEMPLATE, cell.lat, cell.lng),
+      fetchSatelliteValue(SATELLITE_CHLORO_URL_TEMPLATE, cell.lat, cell.lng),
+    ]);
+    const sstRaw = sst.status === "fulfilled" ? sst.value : null;
+    const sstC = sstRaw != null && sstRaw > 100 ? sstRaw - 273.15 : sstRaw;
+    const chloroSignal = chloro.status === "fulfilled" ? chloro.value : null;
+    const hasSatelliteData = sstC != null || chloroSignal != null;
+    const scored = hasSatelliteData
+      ? scoreSatelliteCell({ species, sstC, chloroSignal, distanceKm: cell.distanceKm })
+      : { score: null, reasons: ["No usable satellite SST/chlorophyll"] };
+    return {
+      lat: Number(cell.lat.toFixed(5)),
+      lng: Number(cell.lng.toFixed(5)),
+      radius_km: Number(cellRadiusKm.toFixed(1)),
+      score: scored.score,
+      sst_c: sstC == null ? null : Number(sstC.toFixed(2)),
+      chlorophyll_signal: chloroSignal == null ? null : Number(chloroSignal.toFixed(4)),
+      reasons: scored.reasons,
+      source_status: sst.status === "fulfilled" || chloro.status === "fulfilled" ? "satellite_sampled" : "satellite_unavailable",
+    };
+  }));
+
+  const usable = sampled.filter((cell) => cell.score != null && (cell.sst_c != null || cell.chlorophyll_signal != null));
+  const bestCell = usable.slice().sort((a, b) => Number(b.score) - Number(a.score))[0] || null;
+  const payload = {
+    success: true,
+    species,
+    location: { lat: input.lat, lng: input.lng, radius_km: radiusKm },
+    source_name: "NOAA CoastWatch ERDDAP satellite products",
+    source_status: usable.length ? (usable.length === sampled.length ? "satellite_live" : "satellite_partial") : "satellite_unavailable",
+    partial: usable.length !== sampled.length,
+    data_quality: usable.length ? Math.round((usable.length / sampled.length) * 100) : 0,
+    warning: usable.length
+      ? "Satellite cells are sampled from public NOAA ERDDAP products. Cloud cover, latency and dataset gaps can reduce accuracy."
+      : "Satellite provider did not return usable SST/chlorophyll cells for this area within the timeout.",
+    layers: {
+      sst: { configured: !!SATELLITE_SST_URL_TEMPLATE, provider: "NOAA/JPL MUR SST via ERDDAP" },
+      chlorophyll: { configured: !!SATELLITE_CHLORO_URL_TEMPLATE, provider: "NOAA VIIRS chlorophyll anomaly via ERDDAP" },
+    },
+    sample_count: sampled.length,
+    usable_cell_count: usable.length,
+    cells: usable,
+    best_cell: bestCell,
+    cached: false,
+  };
+  satelliteHeatmapCache.set(cacheKey, { expiresAt: Date.now() + SATELLITE_CACHE_MS, payload });
+  return payload;
 }
 
 async function writeLocalCommunityPosts(posts: CommunityPostRow[]) {
