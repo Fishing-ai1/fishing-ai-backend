@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-22_SATELLITE_HEATMAP";
+const BUILD_ID = "OC_BACKEND_2026-06-28_PELAGIC_GRID";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -3798,6 +3798,25 @@ const satelliteHeatmapHandler = async (req: any, reply: any) => {
 app.get("/satellite/heatmap", satelliteHeatmapHandler);
 app.get("/api/satellite/heatmap", satelliteHeatmapHandler);
 
+const pelagicGridHandler = async (req: any, reply: any) => {
+  try {
+    const lat = num(req.query?.lat);
+    const lng = num(req.query?.lng);
+    const radiusKm = clamp(Number(req.query?.radius_km || 100), 50, 200);
+    const species = str(req.query?.species || "pelagics", "pelagics");
+    if (lat == null || lng == null) {
+      reply.code(400).send({ success: false, error: "lat and lng are required" });
+      return;
+    }
+    ok(reply, await buildPelagicGrid({ lat, lng, radiusKm, species }));
+  } catch (e) {
+    fail(reply, e);
+  }
+};
+
+app.get("/pelagic/grid", pelagicGridHandler);
+app.get("/api/pelagic/grid", pelagicGridHandler);
+
 const speciesDetectHandler = async (req: any, reply: any) => {
   try {
     const body = (req.body || {}) as any;
@@ -4883,6 +4902,118 @@ async function readLocalCommunityPosts(): Promise<CommunityPostRow[]> {
 }
 
 const satelliteHeatmapCache = new Map<string, { expiresAt: number; payload: any }>();
+const pelagicGridCache = new Map<string, { expiresAt: number; payload: any }>();
+
+async function fetchPelagicGridRows(input: { lat: number; lng: number; radiusKm: number }) {
+  const latSpan = input.radiusKm / 111.32;
+  const lngSpan = input.radiusKm / Math.max(20, 111.32 * Math.abs(Math.cos((input.lat * Math.PI) / 180)));
+  const south = Number((input.lat - latSpan).toFixed(4));
+  const north = Number((input.lat + latSpan).toFixed(4));
+  const west = Number((input.lng - lngSpan).toFixed(4));
+  const east = Number((input.lng + lngSpan).toFixed(4));
+  const dataset = "noaacwLEOACSPOSSTL3SnrtPMDay";
+  const subset = `[(last)][(${south}):2:(${north})][(${west}):2:(${east})]`;
+  const variables = `sea_surface_temperature${subset},sst_gradient_magnitude${subset}`;
+  const url = `https://coastwatch.noaa.gov/erddap/griddap/${dataset}.json?${variables}`;
+  const sstSubset = `[(last)][(${south}):1:(${north})][(${west}):1:(${east})]`;
+  const gapFreeUrl = `https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstDaily.json?analysed_sst${sstSubset}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(15000, SATELLITE_TIMEOUT_MS * 2));
+  try {
+    const [response, gapFreeResponse] = await Promise.all([
+      fetch(url, { headers: { Accept: "application/json", "User-Agent": "OceanCoreAI/1.0 pelagic-grid" }, signal: controller.signal }),
+      fetch(gapFreeUrl, { headers: { Accept: "application/json", "User-Agent": "OceanCoreAI/1.0 pelagic-grid" }, signal: controller.signal }),
+    ]);
+    if (!response.ok) throw new Error(`NOAA thermal-front request failed (${response.status})`);
+    if (!gapFreeResponse.ok) throw new Error(`NOAA gap-free SST request failed (${gapFreeResponse.status})`);
+    const [json, gapFreeJson] = await Promise.all([response.json(), gapFreeResponse.json()]) as any[];
+    const rows = Array.isArray(json?.table?.rows) ? json.table.rows : [];
+    const sstRows = Array.isArray(gapFreeJson?.table?.rows) ? gapFreeJson.table.rows : [];
+    if (!rows.length) throw new Error("NOAA returned no pelagic grid observations for this area.");
+    if (!sstRows.length) throw new Error("NOAA returned no gap-free SST grid for this area.");
+    return { rows, sstRows, bounds: { south, north, west, east } };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function pelagicCellScore(species: string, sstC: number, gradient: number) {
+  const profile = satelliteSpeciesProfile(species);
+  const temperatureFit = clamp(1 - Math.abs(sstC - profile.sstIdeal) / 6, 0, 1);
+  const frontFit = clamp(gradient / 0.08, 0, 1);
+  const score = Math.round((temperatureFit * 0.44 + frontFit * 0.56) * 100);
+  return clamp(score, 0, 100);
+}
+
+async function buildPelagicGrid(input: { lat: number; lng: number; radiusKm: number; species: string }) {
+  const species = str(input.species || "pelagics", "pelagics").toLowerCase();
+  const cacheKey = [input.lat.toFixed(2), input.lng.toFixed(2), input.radiusKm, species].join(":");
+  const cached = pelagicGridCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return { ...cached.payload, cached: true };
+
+  const { rows, sstRows, bounds } = await fetchPelagicGridRows(input);
+  const frontPoints = rows
+    .filter((row: any[]) => row?.[4] != null && Number.isFinite(Number(row[4])))
+    .map((row: any[]) => ({ lat: Number(row[1]), lng: Number(row[2]), gradient: Number(row[4]) }));
+  const cells = sstRows.map((row: any[]) => {
+    if (row?.[3] == null) return null;
+    const sst = Number(row?.[3]);
+    const lat = Number(row[1]);
+    const lng = Number(row[2]);
+    let nearestDistance = Infinity;
+    let gradient = 0;
+    frontPoints.forEach((front) => {
+      const northKm = (front.lat - lat) * 111.32;
+      const eastKm = (front.lng - lng) * 111.32 * Math.cos((lat * Math.PI) / 180);
+      const distance = Math.sqrt(northKm ** 2 + eastKm ** 2);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        gradient = front.gradient;
+      }
+    });
+    if (nearestDistance > 8) gradient = 0;
+    if (!Number.isFinite(sst) || !Number.isFinite(gradient)) return null;
+    return {
+      lat: Number(lat.toFixed(4)),
+      lng: Number(lng.toFixed(4)),
+      sst_c: Number(sst.toFixed(2)),
+      front_strength: Number(gradient.toFixed(4)),
+      score: pelagicCellScore(species, sst, gradient),
+    };
+  }).filter(Boolean) as Array<{ lat: number; lng: number; sst_c: number; front_strength: number; score: number }>;
+
+  if (!cells.length) throw new Error("NOAA returned no usable SST/front cells for this area.");
+  const latitudes = [...new Set(sstRows.map((row: any[]) => Number(Number(row[1]).toFixed(4))))].sort((a, b) => a - b);
+  const longitudes = [...new Set(sstRows.map((row: any[]) => Number(Number(row[2]).toFixed(4))))].sort((a, b) => a - b);
+  const best = cells.slice().sort((a, b) => b.score - a.score)[0];
+  const payload = {
+    success: true,
+    product: "OceanCore Pelagic SST/Front Composite",
+    species,
+    observed_at: sstRows[0]?.[0] || rows[0]?.[0] || null,
+    bounds,
+    width: longitudes.length,
+    height: latitudes.length,
+    sample_count: sstRows.length,
+    usable_cell_count: cells.length,
+    data_quality: Math.round((cells.length / sstRows.length) * 100),
+    source_name: "NOAA gap-free daily SST with ACSPO near-real-time thermal fronts",
+    inputs: {
+      sst: { connected: true, weight: 0.44 },
+      thermal_front: { connected: true, weight: 0.56 },
+      chlorophyll: { connected: false },
+      currents: { connected: false },
+      sea_height_eddies: { connected: false },
+    },
+    best_cell: best,
+    latitudes,
+    longitudes,
+    cells,
+    cached: false,
+  };
+  pelagicGridCache.set(cacheKey, { expiresAt: Date.now() + SATELLITE_CACHE_MS, payload });
+  return payload;
+}
 
 function satelliteTemplateUrl(template: string, lat: number, lng: number) {
   return template
