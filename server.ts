@@ -101,9 +101,9 @@ const SATELLITE_HEATMAP_ENABLED = String(process.env.SATELLITE_HEATMAP_ENABLED |
 const SATELLITE_TIMEOUT_MS = Number(process.env.SATELLITE_TIMEOUT_MS || 9000);
 const SATELLITE_CACHE_MS = Number(process.env.SATELLITE_CACHE_MS || 30 * 60 * 1000);
 const SATELLITE_SST_URL_TEMPLATE = envValue("SATELLITE_SST_URL_TEMPLATE") ||
-  "https://coastwatch.noaa.gov/erddap/griddap/jplMURSST41.json?analysed_sst[(last)][({lat})][({lng})]";
+  "https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstDaily.json?analysed_sst[(last)][({lat})][({lng})]";
 const SATELLITE_CHLORO_URL_TEMPLATE = envValue("SATELLITE_CHLORO_URL_TEMPLATE") ||
-  "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPVIIRSchlanomdifDaily.json?chlor_a_diff[(last)][(0.0)][({lat})][({lng})]";
+  "https://coastwatch.noaa.gov/erddap/griddap/noaacwNPPVIIRSchlaDaily.json?chlor_a[(last)][(0.0)][({lat})][({lng})]";
 const DEFAULT_NATIVE_APP_ORIGINS = [
   "capacitor://localhost",
   "ionic://localhost",
