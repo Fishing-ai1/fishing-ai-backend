@@ -384,6 +384,7 @@ type CommunityPostRow = {
   status?: string | null;
   likes_count?: number | null;
   comments_count?: number | null;
+  views_count?: number | null;
   created_at: string;
   updated_at?: string | null;
 };
@@ -606,6 +607,7 @@ const COMMUNITY_REPORTS_FILE = path.join(DATA_DIR, "community-reports.json");
 const COMMUNITY_LIKES_FILE = path.join(DATA_DIR, "community-likes.json");
 const COMMUNITY_FOLLOWS_FILE = path.join(DATA_DIR, "community-follows.json");
 const COMMUNITY_POLL_VOTES_FILE = path.join(DATA_DIR, "community-poll-votes.json");
+const COMMUNITY_VIEWS_FILE = path.join(DATA_DIR, "community-views.json");
 const REWARD_LEDGER_FILE = path.join(DATA_DIR, "reward-ledger.json");
 const AVATAR_IMAGE_MAX_BYTES = Number(process.env.AVATAR_IMAGE_MAX_BYTES || 5 * 1024 * 1024);
 const CATCH_PHOTO_MAX_BYTES = Number(process.env.CATCH_PHOTO_MAX_BYTES || 12 * 1024 * 1024);
@@ -761,6 +763,7 @@ const mem = {
   communityLikes: [] as { post_id: string; user_id: string; user_email?: string | null; created_at: string }[],
   communityFollows: [] as { follower_id: string; following_id: string; created_at: string }[],
   communityPollVotes: [] as { post_id: string; option_id: string; user_id: string; created_at: string }[],
+  communityViews: [] as { post_id: string; user_id: string; created_at: string }[],
   accountSettings: new Map<string, AccountSettingsRow>(),
   rewardLedger: [] as RewardLedgerRow[],
 };
@@ -4708,7 +4711,7 @@ app.delete("/saved-areas/:id", async (req, reply) => {
 // Community - real feed storage, media upload, and filters
 // ============================================================
 const COMMUNITY_POST_SELECT =
-  "id,user_id,user_email,author_name,title,species,general_area,caption,category,post_type,topic,bait,conditions,length_cm,weight_kg,tags,poll_question,poll_options,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,created_at,updated_at";
+  "id,user_id,user_email,author_name,title,species,general_area,caption,category,post_type,topic,bait,conditions,length_cm,weight_kg,tags,poll_question,poll_options,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,views_count,created_at,updated_at";
 const COMMUNITY_COMMENT_SELECT =
   "id,post_id,user_id,user_email,author_name,body,status,created_at,updated_at";
 const COMMUNITY_REPORT_SELECT =
@@ -4836,6 +4839,7 @@ function normalizeCommunityPost(row: any = {}): CommunityPostRow {
     status: str(row.status, "active").slice(0, 30),
     likes_count: Number(row.likes_count || 0),
     comments_count: Number(row.comments_count || 0),
+    views_count: Number(row.views_count || 0),
     created_at: created,
     updated_at: row.updated_at || created,
   };
@@ -5215,6 +5219,19 @@ async function writeLocalCommunityLikes(rows: typeof mem.communityLikes) {
   await fs.promises.writeFile(COMMUNITY_LIKES_FILE, JSON.stringify(mem.communityLikes, null, 2), "utf8");
 }
 
+async function readLocalCommunityViews() {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(COMMUNITY_VIEWS_FILE, "utf8"));
+    mem.communityViews = Array.isArray(parsed) ? parsed : [];
+  } catch {}
+  return mem.communityViews;
+}
+
+async function writeLocalCommunityViews(rows: typeof mem.communityViews) {
+  mem.communityViews = rows.slice(-50000);
+  await fs.promises.writeFile(COMMUNITY_VIEWS_FILE, JSON.stringify(mem.communityViews, null, 2), "utf8");
+}
+
 async function readLocalCommunityFollows() {
   try {
     const parsed = JSON.parse(await fs.promises.readFile(COMMUNITY_FOLLOWS_FILE, "utf8"));
@@ -5424,6 +5441,7 @@ async function createCommunityPostHandler(req: any, reply: any) {
       upload_quality: normalizeCommunityUploadQuality(body.upload_quality),
       likes_count: 0,
       comments_count: 0,
+      views_count: 0,
       created_at: now,
       updated_at: now,
     });
@@ -5505,6 +5523,55 @@ async function communityLikeHandler(req: any, reply: any) {
     }
     const rewards = liked ? await awardCommunityLikeMilestones(post, likesCount) : [];
     ok(reply, { success: true, liked, likes_count: likesCount, rewards });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function communityViewHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post || post.status === "deleted" || !communityPostVisibleToUser(post, user)) throw uploadError("Community video not found.", 404);
+    if (post.post_type !== "video" && post.media_type !== "video" && !str(post.media_mime, "").startsWith("video/")) {
+      throw uploadError("Views can only be recorded for videos.", 400);
+    }
+    if (String(post.user_id || "") === user.id) {
+      ok(reply, { success: true, counted: false, views_count: Number(post.views_count || 0) });
+      return;
+    }
+
+    if (supabase) {
+      const inserted = await supabase.from("community_post_views").insert({
+        post_id: postId,
+        user_id: user.id,
+        created_at: new Date().toISOString(),
+      });
+      if (inserted.error && (inserted.error as any)?.code !== "23505") throw inserted.error;
+      const countRes = await supabase.from("community_post_views").select("post_id", { count: "exact", head: true }).eq("post_id", postId);
+      if (countRes.error) throw countRes.error;
+      const viewsCount = Number(countRes.count || 0);
+      const updated = await supabase.from(COMMUNITY_POSTS_TABLE).update({ views_count: viewsCount }).eq("id", postId);
+      if (updated.error) throw updated.error;
+      ok(reply, { success: true, counted: !inserted.error, views_count: viewsCount });
+      return;
+    }
+
+    const views = await readLocalCommunityViews();
+    const exists = views.some((row) => row.post_id === postId && row.user_id === user.id);
+    if (!exists) {
+      views.push({ post_id: postId, user_id: user.id, created_at: new Date().toISOString() });
+      await writeLocalCommunityViews(views);
+    }
+    const viewsCount = views.filter((row) => row.post_id === postId).length;
+    const posts = await readLocalCommunityPosts();
+    const index = posts.findIndex((row) => row.id === postId);
+    if (index >= 0) {
+      posts[index].views_count = viewsCount;
+      await writeLocalCommunityPosts(posts);
+    }
+    ok(reply, { success: true, counted: !exists, views_count: viewsCount });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
@@ -6134,6 +6201,8 @@ app.post("/community/posts", createCommunityPostHandler);
 app.post("/api/community/posts", createCommunityPostHandler);
 app.post("/community/posts/:id/like", communityLikeHandler);
 app.post("/api/community/posts/:id/like", communityLikeHandler);
+app.post("/community/posts/:id/view", communityViewHandler);
+app.post("/api/community/posts/:id/view", communityViewHandler);
 app.get("/community/posts/:id/comments", communityCommentsHandler);
 app.get("/api/community/posts/:id/comments", communityCommentsHandler);
 app.post("/community/posts/:id/comments", createCommunityCommentHandler);
@@ -6922,6 +6991,8 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/api/community/posts",
       "/community/posts/:id/like",
       "/api/community/posts/:id/like",
+      "/community/posts/:id/view",
+      "/api/community/posts/:id/view",
       "/community/posts/:id/comments",
       "/api/community/posts/:id/comments",
       "/community/posts/:id/report",
