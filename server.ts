@@ -50,6 +50,7 @@ const SUPABASE_URL = envValue("SUPABASE_URL");
 const SUPABASE_SERVICE_KEY = envValue("SUPABASE_SERVICE_KEY");
 const SUPABASE_ANON_KEY = envValue("SUPABASE_ANON_KEY");
 const OPENAI_API_KEY = envValue("OPENAI_API_KEY");
+const MAPBOX_PUBLIC_TOKEN = envValue("MAPBOX_PUBLIC_TOKEN") || envValue("MAPBOX_ACCESS_TOKEN");
 // Prefer the proper Windy env name, but accept WEATHER_API_KEY as a backwards-compatible alias.
 // This fixes Render setups that currently have WEATHER_API_KEY instead of WINDY_POINT_FORECAST_KEY.
 const WINDY_POINT_FORECAST_KEY = envValue("WINDY_POINT_FORECAST_KEY") || envValue("WEATHER_API_KEY");
@@ -2935,6 +2936,8 @@ app.get("/health", async (_req, reply) => {
     openai: !!openai,
     windy_point_forecast_configured: !!WINDY_POINT_FORECAST_KEY,
     windy_key_source: WINDY_KEY_SOURCE,
+    mapbox_configured: !!MAPBOX_PUBLIC_TOKEN,
+    mapbox_public_token: MAPBOX_PUBLIC_TOKEN || null,
     satellite_heatmap_configured: SATELLITE_HEATMAP_ENABLED,
     satellite_sst_template_configured: !!SATELLITE_SST_URL_TEMPLATE,
     satellite_chlorophyll_template_configured: !!SATELLITE_CHLORO_URL_TEMPLATE,
