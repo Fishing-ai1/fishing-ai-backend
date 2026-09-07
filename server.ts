@@ -22,8 +22,12 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { featureFlagsFromEnv } from "./src/feature-flags.ts";
+import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-09-07_AUTH_REDIRECT_FIX";
+const BUILD_ID = "OC_BACKEND_2026-09-08_SOCIAL_FOUNDATION";
+const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
+const feedRankingService = new FeedRankingService();
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -86,14 +90,24 @@ const STRIPE_PRICE_PREMIUM_YEARLY = process.env.STRIPE_PRICE_PREMIUM_YEARLY || p
 const STRIPE_PRICE_CREW_MONTHLY = process.env.STRIPE_PRICE_CREW_MONTHLY || "";
 const STRIPE_PRICE_CREW_YEARLY = process.env.STRIPE_PRICE_CREW_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
-const FRONTEND_DIR = process.env.FRONTEND_DIR || path.resolve(process.cwd(), "../fishing-ai-frontend");
 const DEFAULT_PUBLIC_FRONTEND_URL = "https://oceancore-frontend.vercel.app";
+const FRONTEND_DIR = process.env.FRONTEND_DIR || path.resolve(process.cwd(), "../fishing-ai-frontend");
 const ALLOWED_ORIGINS = csvEnv(process.env.ALLOWED_ORIGINS || FRONTEND_URL || "");
 const DEFAULT_WEB_ORIGINS = csvEnv(
-  process.env.DEFAULT_WEB_ORIGINS || "https://oceancore-frontend.vercel.app"
+  process.env.DEFAULT_WEB_ORIGINS ||
+    [
+      "https://oceancore-frontend.vercel.app",
+      "https://fishing-ai-backend.onrender.com",
+    ].join(",")
+);
+const DEFAULT_WEB_ORIGIN_PATTERNS = csvEnv(
+  process.env.DEFAULT_WEB_ORIGIN_PATTERNS ||
+    [
+      "https://*.vercel.app",
+      "https://*.onrender.com",
+    ].join(",")
 );
 const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-const TRUST_PROXY = String(process.env.TRUST_PROXY || (IS_PRODUCTION ? "true" : "false")).toLowerCase() !== "false";
 function publicFrontendOrigin(value: string) {
   try {
     const url = new URL(normalizeOriginValue(value));
@@ -116,6 +130,7 @@ function publicFrontendOrigin(value: string) {
 const AUTH_REDIRECT_BASE_URL =
   publicFrontendOrigin(envValue("AUTH_REDIRECT_URL") || envValue("PUBLIC_FRONTEND_URL")) ||
   DEFAULT_PUBLIC_FRONTEND_URL;
+const TRUST_PROXY = String(process.env.TRUST_PROXY || (IS_PRODUCTION ? "true" : "false")).toLowerCase() !== "false";
 const SECURITY_HEADERS_ENABLED = String(process.env.SECURITY_HEADERS || "true").toLowerCase() !== "false";
 const RATE_LIMITS_ENABLED = String(process.env.RATE_LIMITS || "true").toLowerCase() !== "false";
 const GEOCODE_SEARCH_URL = envValue("GEOCODE_SEARCH_URL") || "https://nominatim.openstreetmap.org/search";
@@ -264,13 +279,13 @@ function legalPageHtml(title: string, text: string, active: "terms" | "privacy" 
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
   <title>${escapeHtmlText(title)} - OceanCore AI</title>
   <meta name="description" content="OceanCore AI ${escapeHtmlText(title)}. Version ${LEGAL_VERSION}."/>
-  <meta name="theme-color" content="#040813"/>
+  <meta name="theme-color" content="#07191d"/>
   <style>
-    :root{color-scheme:dark;--bg:#040813;--panel:#091225;--line:#20304c;--text:#edf6ff;--muted:#a9bddf;--cyan:#33efe7}
-    *{box-sizing:border-box} body{margin:0;min-height:100vh;background:radial-gradient(circle at top left,rgba(51,239,231,.16),transparent 30%),linear-gradient(180deg,#02050e,var(--bg) 48%,#000);color:var(--text);font:16px/1.65 Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;padding:28px}
-    main{width:min(860px,100%);margin:0 auto;border:1px solid var(--line);border-radius:24px;background:rgba(9,18,37,.92);box-shadow:0 24px 72px rgba(0,0,0,.42);overflow:hidden}
-    header{padding:28px;border-bottom:1px solid var(--line)} .brand{display:flex;gap:14px;align-items:center;margin-bottom:22px}.logo{width:48px;height:48px;border-radius:16px;background:conic-gradient(from 210deg,#49e7ff,#7dffd5,#4c6fff,#49e7ff);box-shadow:0 0 24px rgba(73,231,255,.42)}
-    h1{font-size:32px;line-height:1.15;margin:0 0 8px} .muted{color:var(--muted)} nav{display:flex;gap:10px;flex-wrap:wrap} nav a{color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 12px;font-weight:800} nav a[aria-current=page]{color:#04121a;background:linear-gradient(135deg,#7dffd5,#49e7ff);border-color:transparent}
+    :root{color-scheme:dark;--bg:#07191d;--panel:#0b2529;--line:rgba(201,224,215,.18);--text:#f4f7f2;--muted:#a4bbb4;--cyan:#55bdaa}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;background:#07191d;color:var(--text);font:16px/1.65 Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;padding:28px}
+    main{width:min(860px,100%);margin:0 auto;border:1px solid var(--line);border-radius:18px;background:rgba(8,31,35,.94);box-shadow:0 24px 72px rgba(0,0,0,.42);overflow:hidden}
+    header{padding:28px;border-bottom:1px solid var(--line)} .brand{display:flex;gap:14px;align-items:center;margin-bottom:22px}.logo{width:48px;height:48px;border-radius:50% 50% 50% 16px;background:#16484b;border:2px solid #55bdaa;box-shadow:0 8px 20px rgba(0,0,0,.26);transform:rotate(-18deg)}
+    h1{font-size:32px;line-height:1.15;margin:0 0 8px} .muted{color:var(--muted)} nav{display:flex;gap:10px;flex-wrap:wrap} nav a{color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:9px 12px;font-weight:800} nav a[aria-current=page]{color:#072024;background:#a3ddc8;border-color:transparent}
     section{padding:28px} p{margin:0 0 18px}.footer{border-top:1px solid var(--line);padding:18px 28px;color:var(--muted);font-size:14px} a{color:var(--cyan)}
   </style>
 </head>
@@ -433,6 +448,45 @@ type CommunityReportRow = {
   reason?: string | null;
   notes?: string | null;
   status?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityFriendshipRow = {
+  requester_id: string;
+  addressee_id: string;
+  status: "pending" | "accepted" | "declined";
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityConversationRow = {
+  id: string;
+  conversation_type: "direct" | "group";
+  created_by: string;
+  last_message_at?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityMessageRow = {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  body: string;
+  status: "active" | "held" | "removed";
+  moderation_reason?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type CommunityMessageReportRow = {
+  id: string;
+  message_id: string;
+  reporter_id: string;
+  reason: string;
+  notes?: string | null;
+  status: "open" | "reviewing" | "reviewed" | "closed";
   created_at: string;
   updated_at?: string | null;
 };
@@ -630,6 +684,11 @@ const COMMUNITY_COMMENTS_FILE = path.join(DATA_DIR, "community-comments.json");
 const COMMUNITY_REPORTS_FILE = path.join(DATA_DIR, "community-reports.json");
 const COMMUNITY_LIKES_FILE = path.join(DATA_DIR, "community-likes.json");
 const COMMUNITY_FOLLOWS_FILE = path.join(DATA_DIR, "community-follows.json");
+const COMMUNITY_FRIENDSHIPS_FILE = path.join(DATA_DIR, "community-friendships.json");
+const COMMUNITY_BLOCKS_FILE = path.join(DATA_DIR, "community-blocks.json");
+const COMMUNITY_CONVERSATIONS_FILE = path.join(DATA_DIR, "community-conversations.json");
+const COMMUNITY_MESSAGES_FILE = path.join(DATA_DIR, "community-messages.json");
+const COMMUNITY_MESSAGE_REPORTS_FILE = path.join(DATA_DIR, "community-message-reports.json");
 const COMMUNITY_POLL_VOTES_FILE = path.join(DATA_DIR, "community-poll-votes.json");
 const COMMUNITY_VIEWS_FILE = path.join(DATA_DIR, "community-views.json");
 const REWARD_LEDGER_FILE = path.join(DATA_DIR, "reward-ledger.json");
@@ -660,11 +719,37 @@ const app = Fastify({
   trustProxy: TRUST_PROXY,
 });
 
+function originMatchesAllowedPattern(origin: string) {
+  if (!origin || !DEFAULT_WEB_ORIGIN_PATTERNS.length) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const protocol = parsed.protocol.toLowerCase();
+  return DEFAULT_WEB_ORIGIN_PATTERNS.some((pattern) => {
+    try {
+      const parsedPattern = new URL(pattern.replace("*.", "placeholder."));
+      const patternProtocol = parsedPattern.protocol.toLowerCase();
+      const patternHost = parsedPattern.hostname.toLowerCase();
+      if (patternProtocol !== protocol) return false;
+      if (!pattern.includes("*.")) return hostname === patternHost;
+      const suffix = patternHost.replace(/^placeholder\./, "");
+      return hostname.endsWith(`.${suffix}`) && hostname.length > suffix.length + 1;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function isAllowedOrigin(origin: string | undefined) {
   const value = normalizeOriginValue(origin || "");
   if (!value) return true;
   if (value === "null") return ALLOW_NULL_ORIGIN || EFFECTIVE_ALLOWED_ORIGINS.includes("null") || !IS_PRODUCTION;
-  if (EFFECTIVE_ALLOWED_ORIGINS.length) return EFFECTIVE_ALLOWED_ORIGINS.includes(value);
+  if (EFFECTIVE_ALLOWED_ORIGINS.includes(value)) return true;
+  if (originMatchesAllowedPattern(value)) return true;
   if (!IS_PRODUCTION) return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(value);
   return false;
 }
@@ -786,6 +871,12 @@ const mem = {
   communityReports: [] as CommunityReportRow[],
   communityLikes: [] as { post_id: string; user_id: string; user_email?: string | null; created_at: string }[],
   communityFollows: [] as { follower_id: string; following_id: string; created_at: string }[],
+  communityFriendships: [] as CommunityFriendshipRow[],
+  communityBlocks: [] as { blocker_id: string; blocked_id: string; created_at: string }[],
+  communityConversations: [] as CommunityConversationRow[],
+  communityConversationMembers: [] as { conversation_id: string; user_id: string; joined_at: string; last_read_at?: string | null }[],
+  communityMessages: [] as CommunityMessageRow[],
+  communityMessageReports: [] as CommunityMessageReportRow[],
   communityPollVotes: [] as { post_id: string; option_id: string; user_id: string; created_at: string }[],
   communityViews: [] as { post_id: string; user_id: string; created_at: string }[],
   accountSettings: new Map<string, AccountSettingsRow>(),
@@ -3000,6 +3091,7 @@ app.get("/health", async (_req, reply) => {
       strip_image_metadata: STRIP_IMAGE_UPLOAD_METADATA,
       metadata_stripped_image_mime_types: METADATA_STRIPPED_IMAGE_MIME_TYPES,
     },
+    feature_flags: SOCIAL_FEATURE_FLAGS,
     has_species_detect_route: true,
     species_detect_paths: [
       "/ai/species-detect",
@@ -3043,6 +3135,13 @@ app.get("/health", async (_req, reply) => {
       "memory_pages",
       "web_learn",
     ],
+  });
+});
+
+app.get("/api/feature-flags", async (_req, reply) => {
+  ok(reply, {
+    success: true,
+    flags: SOCIAL_FEATURE_FLAGS,
   });
 });
 
@@ -5280,6 +5379,101 @@ async function writeLocalCommunityFollows(rows: typeof mem.communityFollows) {
   await fs.promises.writeFile(COMMUNITY_FOLLOWS_FILE, JSON.stringify(mem.communityFollows, null, 2), "utf8");
 }
 
+async function readLocalJsonRows<T>(file: string, fallback: T[]): Promise<T[]> {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(file, "utf8"));
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch { return fallback; }
+}
+
+async function writeLocalJsonRows<T>(file: string, rows: T[], maxRows = 10000) {
+  await fs.promises.writeFile(file, JSON.stringify(rows.slice(-maxRows), null, 2), "utf8");
+}
+
+async function readLocalCommunityFriendships() {
+  mem.communityFriendships = await readLocalJsonRows(COMMUNITY_FRIENDSHIPS_FILE, mem.communityFriendships);
+  return mem.communityFriendships;
+}
+
+async function writeLocalCommunityFriendships(rows: CommunityFriendshipRow[]) {
+  mem.communityFriendships = rows.slice(-10000);
+  await writeLocalJsonRows(COMMUNITY_FRIENDSHIPS_FILE, mem.communityFriendships);
+}
+
+async function readLocalCommunityBlocks() {
+  mem.communityBlocks = await readLocalJsonRows(COMMUNITY_BLOCKS_FILE, mem.communityBlocks);
+  return mem.communityBlocks;
+}
+
+async function writeLocalCommunityBlocks(rows: typeof mem.communityBlocks) {
+  mem.communityBlocks = rows.slice(-10000);
+  await writeLocalJsonRows(COMMUNITY_BLOCKS_FILE, mem.communityBlocks);
+}
+
+async function readLocalCommunityConversations() {
+  const stored = await readLocalJsonRows(COMMUNITY_CONVERSATIONS_FILE, [] as any[]);
+  mem.communityConversations = Array.isArray(stored) ? stored : [];
+  mem.communityConversationMembers = mem.communityConversations.flatMap((row: any) => Array.isArray(row.members) ? row.members.map((user_id: string) => ({ conversation_id: row.id, user_id, joined_at: row.created_at })) : []);
+  return mem.communityConversations;
+}
+
+async function writeLocalCommunityConversations(rows: CommunityConversationRow[], members: typeof mem.communityConversationMembers) {
+  mem.communityConversations = rows.slice(-10000);
+  mem.communityConversationMembers = members.slice(-20000);
+  const serializable = mem.communityConversations.map(row => ({ ...row, members: mem.communityConversationMembers.filter(member => member.conversation_id === row.id).map(member => member.user_id) }));
+  await writeLocalJsonRows(COMMUNITY_CONVERSATIONS_FILE, serializable);
+}
+
+async function readLocalCommunityMessages() {
+  mem.communityMessages = await readLocalJsonRows(COMMUNITY_MESSAGES_FILE, mem.communityMessages);
+  return mem.communityMessages;
+}
+
+async function writeLocalCommunityMessages(rows: CommunityMessageRow[]) {
+  mem.communityMessages = rows.slice(-30000);
+  await writeLocalJsonRows(COMMUNITY_MESSAGES_FILE, mem.communityMessages, 30000);
+}
+
+async function readLocalCommunityMessageReports() {
+  mem.communityMessageReports = await readLocalJsonRows(COMMUNITY_MESSAGE_REPORTS_FILE, mem.communityMessageReports);
+  return mem.communityMessageReports;
+}
+
+async function writeLocalCommunityMessageReports(rows: CommunityMessageReportRow[]) {
+  mem.communityMessageReports = rows.slice(-30000);
+  await writeLocalJsonRows(COMMUNITY_MESSAGE_REPORTS_FILE, mem.communityMessageReports, 30000);
+}
+
+function directFriendshipRow(rows: CommunityFriendshipRow[], left: string, right: string) {
+  return rows.find(row => (row.requester_id === left && row.addressee_id === right) || (row.requester_id === right && row.addressee_id === left)) || null;
+}
+
+async function areCommunityFriends(left: string, right: string) {
+  if (!left || !right || left === right) return false;
+  if (supabase) {
+    const result = await supabase.from("community_friendships").select("status").eq("status", "accepted").or(`and(requester_id.eq.${left},addressee_id.eq.${right}),and(requester_id.eq.${right},addressee_id.eq.${left})`).maybeSingle();
+    if (!result.error) return !!result.data;
+  }
+  return directFriendshipRow(await readLocalCommunityFriendships(), left, right)?.status === "accepted";
+}
+
+async function communityUsersBlocked(left: string, right: string) {
+  if (supabase) {
+    const result = await supabase.from("community_blocks").select("blocker_id").or(`and(blocker_id.eq.${left},blocked_id.eq.${right}),and(blocker_id.eq.${right},blocked_id.eq.${left})`).maybeSingle();
+    if (!result.error) return !!result.data;
+  }
+  return (await readLocalCommunityBlocks()).some(row => (row.blocker_id === left && row.blocked_id === right) || (row.blocker_id === right && row.blocked_id === left));
+}
+
+async function communityMemberName(userId: string) {
+  if (supabase) {
+    const result = await supabase.from(PROFILES_TABLE).select("full_name,username,email").eq("id", userId).maybeSingle();
+    if (!result.error && result.data) return result.data.full_name || result.data.username || result.data.email || "OceanCore member";
+  }
+  const profile = mem.profiles.get(userId);
+  return profile?.full_name || profile?.username || profile?.email || "OceanCore member";
+}
+
 async function readLocalCommunityPollVotes() {
   try {
     const parsed = JSON.parse(await fs.promises.readFile(COMMUNITY_POLL_VOTES_FILE, "utf8"));
@@ -5379,6 +5573,120 @@ function withPublicCommunityMedia(req: any, post: CommunityPostRow) {
     ...post,
     media_url: makeAbsoluteMediaUrl(req, post.media_url),
   };
+}
+
+function communityPostToFeedItem(req: any, post: CommunityPostRow, score: number) {
+  const mediaUrl = makeAbsoluteMediaUrl(req, post.media_url);
+  const postType = str(post.post_type, "post") || "post";
+  const isVideo = postType === "video" || str(post.media_type).toLowerCase() === "video" || str(post.media_mime).startsWith("video/");
+  return {
+    id: post.id,
+    source: "community",
+    type: isVideo ? "video" : postType,
+    title: post.title || post.species || "OceanCore update",
+    caption: post.caption || "",
+    creator: {
+      id: post.user_id,
+      name: post.author_name || post.user_email || "OceanCore angler",
+    },
+    species: post.species || null,
+    general_area: post.general_area || null,
+    category: post.category || null,
+    privacy: post.privacy || "public",
+    media: mediaUrl
+      ? {
+          url: mediaUrl,
+          type: isVideo ? "video" : post.media_type || "image",
+          mime: post.media_mime || null,
+        }
+      : null,
+    metrics: {
+      likes: Number(post.likes_count || 0),
+      comments: Number(post.comments_count || 0),
+      views: Number(post.views_count || 0),
+    },
+    ranking_score: Math.round(score * 100) / 100,
+    created_at: post.created_at,
+    updated_at: post.updated_at,
+    spot_safe: true,
+  };
+}
+
+async function socialFeedHandler(req: any, reply: any) {
+  try {
+    const user = await getAuthUser(req);
+    const feed = str(req.query?.feed, "home").toLowerCase();
+    const category = str(req.query?.category, "").toLowerCase();
+    const species = str(req.query?.species, "");
+    const location = str(req.query?.location, "");
+    const limit = clamp(Number(req.query?.limit || 30), 1, 50);
+    const rawCursor = Number(req.query?.cursor || 0);
+    const offset = Number.isFinite(rawCursor) ? clamp(Math.floor(rawCursor), 0, 10_000) : 0;
+    const baseFilter =
+      feed === "following" || feed === "trending" || feed === "videos" || feed === "boats"
+        ? feed
+        : "";
+    const result = await listCommunityPostsForUser(user, baseFilter);
+    const followedAuthorIds = await communityFollowingIds(user.id);
+    const preferredSpecies = new Set(
+      [species]
+        .filter(Boolean)
+        .map((value) => value.toLowerCase()),
+    );
+    const preferredLocations = new Set(
+      [location]
+        .filter(Boolean)
+        .map((value) => value.toLowerCase()),
+    );
+
+    const posts = result.posts
+      .filter((post) => !category || String(post.category || "").toLowerCase() === category)
+      .filter((post) => !species || String(post.species || "").toLowerCase().includes(species.toLowerCase()))
+      .filter((post) => !location || String(post.general_area || "").toLowerCase().includes(location.toLowerCase()))
+      .filter((post) => feed !== "local" || ["fishing_report", "catch", "trip_report"].includes(String(post.post_type || "")))
+      .filter((post) => feed !== "catches" || String(post.post_type || "") === "catch");
+
+    const candidates = posts.map((post) => {
+      const candidate = {
+        id: post.id,
+        authorId: post.user_id,
+        contentType: post.post_type,
+        createdAt: post.created_at,
+        likesCount: post.likes_count,
+        commentsCount: post.comments_count,
+        viewsCount: post.views_count,
+        generalLocation: String(post.general_area || "").toLowerCase(),
+        taggedSpecies: post.species ? [String(post.species).toLowerCase()] : [],
+        metadata: { post },
+      } satisfies FeedCandidate;
+      return { post, score: feedRankingService.score(candidate, { followedAuthorIds, preferredSpecies, preferredLocations }) };
+    });
+
+    const ordered = candidates.sort((a, b) => feed === "latest"
+      ? String(b.post.created_at || "").localeCompare(String(a.post.created_at || ""))
+      : b.score - a.score);
+    const page = ordered.slice(offset, offset + limit);
+    const ranked = page.map(({ post, score }) => communityPostToFeedItem(req, post, score));
+    const nextCursor = offset + page.length < ordered.length ? String(offset + page.length) : null;
+
+    ok(reply, {
+      success: true,
+      feed,
+      items: ranked,
+      count: ranked.length,
+      available_count: ordered.length,
+      has_more: nextCursor !== null,
+      next_cursor: nextCursor,
+      storage: result.storage,
+      ranking: {
+        service: "FeedRankingService",
+        factors: ["freshness", "engagement", "followed creators", "species interests", "location relevance"],
+      },
+      spot_safe: true,
+    });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
 }
 
 async function communityPostsHandler(req: any, reply: any) {
@@ -5563,9 +5871,60 @@ async function communityLikeHandler(req: any, reply: any) {
   }
 }
 
-async function communityViewHandler(req: any, reply: any) {
+async function communitySavedPostsHandler(req: any, reply: any) {
   try {
     const user = await getCommunityWriteUser(req);
+    if (!supabase) throw uploadError("Saved posts need the OceanCore database connection.", 503);
+    const saved = await supabase
+      .from("community_saves")
+      .select("post_id,created_at")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (saved.error) throw saved.error;
+    ok(reply, { success: true, post_ids: (saved.data || []).map((row: any) => row.post_id) });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function communitySaveHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const postId = str((req.params as any)?.id);
+    const post = await findCommunityPostById(postId);
+    if (!post || post.status === "deleted" || !communityPostVisibleToUser(post, user)) {
+      throw uploadError("Community post not found.", 404);
+    }
+    if (!supabase) throw uploadError("Saved posts need the OceanCore database connection.", 503);
+
+    const existing = await supabase
+      .from("community_saves")
+      .select("post_id")
+      .eq("post_id", postId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (existing.error) throw existing.error;
+
+    let saved = true;
+    if (existing.data) {
+      const removed = await supabase.from("community_saves").delete().eq("post_id", postId).eq("user_id", user.id);
+      if (removed.error) throw removed.error;
+      saved = false;
+    } else {
+      const created = await supabase.from("community_saves").insert({ post_id: postId, user_id: user.id });
+      if (created.error) throw created.error;
+    }
+    ok(reply, { success: true, saved, post_id: postId });
+  } catch (e) {
+    fail(reply, e, (e as any)?.statusCode || 500);
+  }
+}
+
+async function communityViewHandler(req: any, reply: any) {
+  try {
+    const user = await getAuthUser(req);
+    const viewerKey = user.isGuest ? clientRateKey(req, "community_video_view") : "";
     const postId = str((req.params as any)?.id);
     const post = await findCommunityPostById(postId);
     if (!post || post.status === "deleted" || !communityPostVisibleToUser(post, user)) throw uploadError("Community video not found.", 404);
@@ -5578,11 +5937,13 @@ async function communityViewHandler(req: any, reply: any) {
     }
 
     if (supabase) {
-      const inserted = await supabase.from("community_post_views").insert({
+      const viewRow: any = {
         post_id: postId,
-        user_id: user.id,
         created_at: new Date().toISOString(),
-      });
+      };
+      if (user.isGuest) viewRow.viewer_key = viewerKey;
+      else viewRow.user_id = user.id;
+      const inserted = await supabase.from("community_post_views").insert(viewRow);
       if (inserted.error && (inserted.error as any)?.code !== "23505") throw inserted.error;
       const countRes = await supabase.from("community_post_views").select("post_id", { count: "exact", head: true }).eq("post_id", postId);
       if (countRes.error) throw countRes.error;
@@ -5594,9 +5955,10 @@ async function communityViewHandler(req: any, reply: any) {
     }
 
     const views = await readLocalCommunityViews();
-    const exists = views.some((row) => row.post_id === postId && row.user_id === user.id);
+    const localViewerId = user.isGuest ? viewerKey : user.id;
+    const exists = views.some((row) => row.post_id === postId && row.user_id === localViewerId);
     if (!exists) {
-      views.push({ post_id: postId, user_id: user.id, created_at: new Date().toISOString() });
+      views.push({ post_id: postId, user_id: localViewerId, created_at: new Date().toISOString() });
       await writeLocalCommunityViews(views);
     }
     const viewsCount = views.filter((row) => row.post_id === postId).length;
@@ -5889,7 +6251,7 @@ async function adminSupportCenterHandler(req: any, reply: any) {
   try {
     const admin = await requireAdminUser(req);
     const data = await getAdminData(1000);
-    const [feedback, audit, community, comments, reports, follows] = await Promise.all([
+    const [feedback, audit, community, comments, reports, follows, heldMessages, messageReports] = await Promise.all([
       listFeedbackRows(300),
       listAuditRows(150),
       listCommunityPostsForUser(admin, "").catch(() => ({ posts: [] as CommunityPostRow[], storage: "unavailable" })),
@@ -5898,6 +6260,12 @@ async function adminSupportCenterHandler(req: any, reply: any) {
         ? supabase.from("community_reports").select(COMMUNITY_REPORT_SELECT).order("created_at", { ascending: false }).limit(300).then((r) => (r.data || []).map(normalizeCommunityReport)).catch(() => [])
         : readLocalCommunityReports(),
       listAdminCommunityFollows(500),
+      supabase
+        ? supabase.from("community_messages").select("id,conversation_id,sender_id,body,status,moderation_reason,created_at,updated_at").eq("status", "held").order("created_at", { ascending: false }).limit(300).then((r) => r.error ? [] : r.data || []).catch(() => [])
+        : (await readLocalCommunityMessages()).filter((row) => row.status === "held"),
+      supabase
+        ? supabase.from("community_message_reports").select("id,message_id,reporter_id,reason,notes,status,created_at,updated_at").order("created_at", { ascending: false }).limit(300).then((r) => r.error ? [] : r.data || []).catch(() => [])
+        : readLocalCommunityMessageReports(),
     ]);
 
     const profilesById = new Map((data.profiles || []).map((profile: any) => [String(profile.id), profile]));
@@ -6006,6 +6374,26 @@ async function adminSupportCenterHandler(req: any, reply: any) {
         body: comment.body,
         created_at: comment.created_at,
       })),
+      ...(heldMessages as CommunityMessageRow[]).map((message) => ({
+        queue_type: "held_message",
+        id: message.id,
+        conversation_id: message.conversation_id,
+        status: message.status,
+        reason: message.moderation_reason || "automated_safety_review",
+        user_id: message.sender_id,
+        body: message.body,
+        created_at: message.created_at,
+      })),
+      ...(messageReports as CommunityMessageReportRow[]).filter((report) => report.status !== "closed").map((report) => ({
+        queue_type: "reported_message",
+        id: report.id,
+        message_id: report.message_id,
+        status: report.status,
+        reason: report.reason,
+        notes: report.notes || null,
+        user_id: report.reporter_id,
+        created_at: report.created_at,
+      })),
     ].sort((a: any, b: any) => Date.parse(String(b.created_at || "")) - Date.parse(String(a.created_at || "")));
 
     ok(reply, {
@@ -6017,15 +6405,14 @@ async function adminSupportCenterHandler(req: any, reply: any) {
       social_graph: socialGraph,
       recent_follows: (follows as any[]).slice(0, 80),
       message_safety: {
-        status: "not_enabled",
-        recommendation: "Enable direct messages only after mutual follow, report/block controls, AI moderation, and admin review of flagged conversations are live.",
+        status: "friend_only_foundation",
+        recommendation: "Direct messages require an accepted friend connection. Obvious scam-like messages are held automatically, and member-reported messages appear in the admin moderation queue. Add per-account rate limits before a wider rollout.",
         required_controls: [
-          "Mutual-follow or approved-friend messaging",
-          "AI scan before message delivery",
-          "User block and report",
-          "Admin queue for flagged/reported messages only",
-          "Audit log for moderator access",
-          "Rate limits and spam detection",
+          "Accepted-friend messaging",
+          "Automated suspicious-link and scam-term hold",
+          "User block control",
+          "Admin review queue for held/reported messages",
+          "Per-account message rate limits",
         ],
       },
       totals: {
@@ -6033,6 +6420,7 @@ async function adminSupportCenterHandler(req: any, reply: any) {
         moderation_items: moderationQueue.length,
         safety_flags: safetyFlags.length,
         follows: (follows as any[]).length,
+        message_reports: (messageReports as CommunityMessageReportRow[]).length,
       },
       audit,
     });
@@ -6170,6 +6558,259 @@ async function communityFollowHandler(req: any, reply: any) {
   } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
 }
 
+async function communityFriendsHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const rows: CommunityFriendshipRow[] = supabase
+      ? await supabase.from("community_friendships").select("requester_id,addressee_id,status,created_at,updated_at").or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`).then(result => {
+          if (result.error) throw result.error;
+          return result.data || [];
+        })
+      : await readLocalCommunityFriendships();
+    const mine = rows.filter(row => row.requester_id === user.id || row.addressee_id === user.id);
+    const present = async (row: CommunityFriendshipRow) => {
+      const other_id = row.requester_id === user.id ? row.addressee_id : row.requester_id;
+      return { ...row, other_id, other_name: await communityMemberName(other_id), direction: row.requester_id === user.id ? "outgoing" : "incoming" };
+    };
+    const detailed = await Promise.all(mine.map(present));
+    ok(reply, {
+      success: true,
+      friends: detailed.filter(row => row.status === "accepted"),
+      requests: detailed.filter(row => row.status === "pending"),
+    });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityFriendRequestHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const targetId = str(req.params?.id, "");
+    if (!targetId || targetId === user.id) throw uploadError("Choose another OceanCore member.", 400);
+    if (await communityUsersBlocked(user.id, targetId)) throw uploadError("This connection is not available.", 403);
+    const now = new Date().toISOString();
+    let friendship: CommunityFriendshipRow | null = null;
+    if (supabase) {
+      const existing = await supabase.from("community_friendships").select("requester_id,addressee_id,status,created_at,updated_at").or(`and(requester_id.eq.${user.id},addressee_id.eq.${targetId}),and(requester_id.eq.${targetId},addressee_id.eq.${user.id})`).maybeSingle();
+      if (existing.error) throw existing.error;
+      if (existing.data?.status === "accepted") friendship = existing.data as CommunityFriendshipRow;
+      else if (existing.data?.requester_id === targetId && existing.data?.status === "pending") {
+        const saved = await supabase.from("community_friendships").update({ status: "accepted", updated_at: now }).eq("requester_id", targetId).eq("addressee_id", user.id).select("requester_id,addressee_id,status,created_at,updated_at").single();
+        if (saved.error) throw saved.error;
+        friendship = saved.data as CommunityFriendshipRow;
+      } else if (existing.data) friendship = existing.data as CommunityFriendshipRow;
+      else {
+        const saved = await supabase.from("community_friendships").insert({ requester_id: user.id, addressee_id: targetId, status: "pending", created_at: now, updated_at: now }).select("requester_id,addressee_id,status,created_at,updated_at").single();
+        if (saved.error) throw saved.error;
+        friendship = saved.data as CommunityFriendshipRow;
+      }
+    } else {
+      const rows = await readLocalCommunityFriendships();
+      const existing = directFriendshipRow(rows, user.id, targetId);
+      if (existing?.status === "accepted") friendship = existing;
+      else if (existing?.requester_id === targetId && existing.status === "pending") { existing.status = "accepted"; existing.updated_at = now; friendship = existing; await writeLocalCommunityFriendships(rows); }
+      else if (existing) friendship = existing;
+      else { friendship = { requester_id: user.id, addressee_id: targetId, status: "pending", created_at: now, updated_at: now }; rows.push(friendship); await writeLocalCommunityFriendships(rows); }
+    }
+    ok(reply, { success: true, friendship, status: friendship?.status, message: friendship?.status === "accepted" ? "You are now friends." : "Friend request sent." });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityFriendAcceptHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const requesterId = str(req.params?.id, "");
+    const now = new Date().toISOString();
+    if (supabase) {
+      const saved = await supabase.from("community_friendships").update({ status: "accepted", updated_at: now }).eq("requester_id", requesterId).eq("addressee_id", user.id).eq("status", "pending").select("requester_id,addressee_id,status,created_at,updated_at").maybeSingle();
+      if (saved.error) throw saved.error;
+      if (!saved.data) throw uploadError("Friend request not found.", 404);
+      ok(reply, { success: true, friendship: saved.data });
+      return;
+    }
+    const rows = await readLocalCommunityFriendships();
+    const row = rows.find(item => item.requester_id === requesterId && item.addressee_id === user.id && item.status === "pending");
+    if (!row) throw uploadError("Friend request not found.", 404);
+    row.status = "accepted"; row.updated_at = now;
+    await writeLocalCommunityFriendships(rows);
+    ok(reply, { success: true, friendship: row });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityBlockHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const targetId = str(req.params?.id, "");
+    if (!targetId || targetId === user.id) throw uploadError("Choose another OceanCore member.", 400);
+    const now = new Date().toISOString();
+    if (supabase) {
+      const saved = await supabase.from("community_blocks").upsert({ blocker_id: user.id, blocked_id: targetId, created_at: now }, { onConflict: "blocker_id,blocked_id" });
+      if (saved.error) throw saved.error;
+      await supabase.from("community_friendships").delete().or(`and(requester_id.eq.${user.id},addressee_id.eq.${targetId}),and(requester_id.eq.${targetId},addressee_id.eq.${user.id})`);
+    } else {
+      const blocks = await readLocalCommunityBlocks();
+      if (!blocks.some(row => row.blocker_id === user.id && row.blocked_id === targetId)) blocks.push({ blocker_id: user.id, blocked_id: targetId, created_at: now });
+      await writeLocalCommunityBlocks(blocks);
+      const friends = (await readLocalCommunityFriendships()).filter(row => !((row.requester_id === user.id && row.addressee_id === targetId) || (row.requester_id === targetId && row.addressee_id === user.id)));
+      await writeLocalCommunityFriendships(friends);
+    }
+    await writeAuditLog(user, "community_member_blocked", "community_user", targetId, {});
+    ok(reply, { success: true, blocked: true });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityConversationRowsForUser(userId: string) {
+  if (supabase) {
+    const membership = await supabase.from("community_conversation_members").select("conversation_id,user_id,joined_at,last_read_at").eq("user_id", userId);
+    if (membership.error) throw membership.error;
+    const ids = (membership.data || []).map((row: any) => row.conversation_id);
+    if (!ids.length) return { conversations: [] as CommunityConversationRow[], members: [] as any[] };
+    const [conversations, members] = await Promise.all([
+      supabase.from("community_conversations").select("id,conversation_type,created_by,last_message_at,created_at,updated_at").in("id", ids),
+      supabase.from("community_conversation_members").select("conversation_id,user_id,joined_at,last_read_at").in("conversation_id", ids),
+    ]);
+    if (conversations.error) throw conversations.error;
+    if (members.error) throw members.error;
+    return { conversations: (conversations.data || []) as CommunityConversationRow[], members: members.data || [] };
+  }
+  const conversations = await readLocalCommunityConversations();
+  return { conversations: conversations.filter(row => mem.communityConversationMembers.some(member => member.conversation_id === row.id && member.user_id === userId)), members: mem.communityConversationMembers };
+}
+
+async function communityConversationsHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const { conversations, members } = await communityConversationRowsForUser(user.id);
+    const messageRows = supabase
+      ? [] as CommunityMessageRow[]
+      : await readLocalCommunityMessages();
+    const result = await Promise.all(conversations.sort((a,b) => String(b.last_message_at || b.created_at).localeCompare(String(a.last_message_at || a.created_at))).map(async conversation => {
+      const other = members.find((member: any) => member.conversation_id === conversation.id && member.user_id !== user.id)?.user_id || null;
+      const latest = messageRows.filter(row => row.conversation_id === conversation.id).slice(-1)[0] || null;
+      return { ...conversation, other_user_id: other, other_name: other ? await communityMemberName(other) : "OceanCore conversation", last_message: latest?.body || null };
+    }));
+    ok(reply, { success: true, conversations: result });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityStartConversationHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const targetId = str(req.body?.recipient_id, "");
+    if (!targetId || targetId === user.id) throw uploadError("Choose a friend to message.", 400);
+    if (!await areCommunityFriends(user.id, targetId)) throw uploadError("Messages are available after both people accept the friend connection.", 403);
+    if (await communityUsersBlocked(user.id, targetId)) throw uploadError("This connection is not available.", 403);
+    let conversation: CommunityConversationRow | null = null;
+    if (supabase) {
+      const mine = await supabase.from("community_conversation_members").select("conversation_id").eq("user_id", user.id);
+      if (mine.error) throw mine.error;
+      const ids = (mine.data || []).map((row: any) => row.conversation_id);
+      if (ids.length) {
+        const other = await supabase.from("community_conversation_members").select("conversation_id").eq("user_id", targetId).in("conversation_id", ids).maybeSingle();
+        if (other.data) {
+          const found = await supabase.from("community_conversations").select("id,conversation_type,created_by,last_message_at,created_at,updated_at").eq("id", other.data.conversation_id).eq("conversation_type", "direct").maybeSingle();
+          conversation = found.data as CommunityConversationRow | null;
+        }
+      }
+      if (!conversation) {
+        const created = await supabase.from("community_conversations").insert({ conversation_type: "direct", created_by: user.id }).select("id,conversation_type,created_by,last_message_at,created_at,updated_at").single();
+        if (created.error) throw created.error;
+        conversation = created.data as CommunityConversationRow;
+        const members = await supabase.from("community_conversation_members").insert([{ conversation_id: conversation.id, user_id: user.id }, { conversation_id: conversation.id, user_id: targetId }]);
+        if (members.error) throw members.error;
+      }
+    } else {
+      await readLocalCommunityConversations();
+      conversation = mem.communityConversations.find(row => row.conversation_type === "direct" && mem.communityConversationMembers.filter(member => member.conversation_id === row.id).map(member => member.user_id).sort().join(":") === [user.id, targetId].sort().join(":")) || null;
+      if (!conversation) {
+        const now = new Date().toISOString();
+        conversation = { id: crypto.randomUUID(), conversation_type: "direct", created_by: user.id, created_at: now, updated_at: now };
+        mem.communityConversations.push(conversation);
+        mem.communityConversationMembers.push({ conversation_id: conversation.id, user_id: user.id, joined_at: now }, { conversation_id: conversation.id, user_id: targetId, joined_at: now });
+        await writeLocalCommunityConversations(mem.communityConversations, mem.communityConversationMembers);
+      }
+    }
+    ok(reply, { success: true, conversation });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityMessagesHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const id = str(req.params?.id, "");
+    const { conversations, members } = await communityConversationRowsForUser(user.id);
+    if (!conversations.some(row => row.id === id) || !members.some((member: any) => member.conversation_id === id && member.user_id === user.id)) throw uploadError("Conversation not found.", 404);
+    const rows = supabase
+      ? await supabase.from("community_messages").select("id,conversation_id,sender_id,body,status,moderation_reason,created_at,updated_at").eq("conversation_id", id).neq("status", "removed").order("created_at", { ascending: true }).then(result => { if (result.error) throw result.error; return result.data || []; })
+      : (await readLocalCommunityMessages()).filter(row => row.conversation_id === id && row.status !== "removed");
+    ok(reply, { success: true, messages: rows });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communityReportMessageHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const messageId = str(req.params?.id, "");
+    const reason = str(req.body?.reason, "message_safety").trim().slice(0, 120) || "message_safety";
+    const notes = str(req.body?.notes, "").trim().slice(0, 1000) || null;
+    const message: CommunityMessageRow | null = supabase
+      ? await supabase.from("community_messages").select("id,conversation_id,sender_id,body,status,moderation_reason,created_at,updated_at").eq("id", messageId).maybeSingle().then(result => {
+          if (result.error) throw result.error;
+          return result.data as CommunityMessageRow | null;
+        })
+      : (await readLocalCommunityMessages()).find(row => row.id === messageId) || null;
+    if (!message) throw uploadError("Message not found.", 404);
+    if (message.sender_id === user.id) throw uploadError("You cannot report your own message.", 400);
+    const { conversations, members } = await communityConversationRowsForUser(user.id);
+    if (!conversations.some(row => row.id === message.conversation_id) || !members.some((member: any) => member.conversation_id === message.conversation_id && member.user_id === user.id)) {
+      throw uploadError("Message not found.", 404);
+    }
+    const now = new Date().toISOString();
+    const row: CommunityMessageReportRow = { id: crypto.randomUUID(), message_id: message.id, reporter_id: user.id, reason, notes, status: "open", created_at: now, updated_at: now };
+    if (supabase) {
+      const saved = await supabase.from("community_message_reports").insert(row).select("id,message_id,reporter_id,reason,notes,status,created_at,updated_at").single();
+      if (saved.error) throw saved.error;
+      await writeAuditLog(user, "community_message_reported", "community_message", message.id, { reason });
+      ok(reply, { success: true, report: saved.data });
+      return;
+    }
+    const reports = await readLocalCommunityMessageReports();
+    reports.push(row);
+    await writeLocalCommunityMessageReports(reports);
+    await writeAuditLog(user, "community_message_reported", "community_message", message.id, { reason });
+    ok(reply, { success: true, report: row });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
+async function communitySendMessageHandler(req: any, reply: any) {
+  try {
+    const user = await getCommunityWriteUser(req);
+    const id = str(req.params?.id, "");
+    const body = str(req.body?.body, "").trim().slice(0, 2000);
+    if (!body) throw uploadError("Write a message first.", 400);
+    const { conversations, members } = await communityConversationRowsForUser(user.id);
+    const conversation = conversations.find(row => row.id === id);
+    const otherId = members.find((member: any) => member.conversation_id === id && member.user_id !== user.id)?.user_id;
+    if (!conversation || !otherId) throw uploadError("Conversation not found.", 404);
+    if (!await areCommunityFriends(user.id, otherId) || await communityUsersBlocked(user.id, otherId)) throw uploadError("This message cannot be sent.", 403);
+    const status: CommunityMessageRow["status"] = /https?:\/\/|\b(crypto|gift card|wire transfer|password)\b/i.test(body) ? "held" : "active";
+    const now = new Date().toISOString();
+    const row: CommunityMessageRow = { id: crypto.randomUUID(), conversation_id: id, sender_id: user.id, body, status, moderation_reason: status === "held" ? "automated safety review" : null, created_at: now, updated_at: now };
+    if (supabase) {
+      const saved = await supabase.from("community_messages").insert(row).select("id,conversation_id,sender_id,body,status,moderation_reason,created_at,updated_at").single();
+      if (saved.error) throw saved.error;
+      await supabase.from("community_conversations").update({ last_message_at: now, updated_at: now }).eq("id", id);
+      ok(reply, { success: true, message: saved.data, held_for_review: status === "held" });
+      return;
+    }
+    const rows = await readLocalCommunityMessages();
+    rows.push(row);
+    await writeLocalCommunityMessages(rows);
+    conversation.last_message_at = now; conversation.updated_at = now;
+    await writeLocalCommunityConversations(mem.communityConversations, mem.communityConversationMembers);
+    ok(reply, { success: true, message: row, held_for_review: status === "held" });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
 async function communityPollVoteHandler(req: any, reply: any) {
   try {
     const user = await getCommunityWriteUser(req);
@@ -6232,24 +6873,66 @@ async function communityDashboardHandler(req: any, reply: any) {
 
 app.get("/community/posts", communityPostsHandler);
 app.get("/api/community/posts", communityPostsHandler);
+app.get("/social/feed", socialFeedHandler);
+app.get("/api/social/feed", socialFeedHandler);
 app.post("/community/posts", createCommunityPostHandler);
 app.post("/api/community/posts", createCommunityPostHandler);
 app.post("/community/posts/:id/like", communityLikeHandler);
 app.post("/api/community/posts/:id/like", communityLikeHandler);
+app.post("/social/content/:id/like", communityLikeHandler);
+app.post("/api/social/content/:id/like", communityLikeHandler);
+app.post("/social/content/:id/reaction", communityLikeHandler);
+app.post("/api/social/content/:id/reaction", communityLikeHandler);
+app.get("/community/saves", communitySavedPostsHandler);
+app.get("/api/community/saves", communitySavedPostsHandler);
+app.get("/social/saves", communitySavedPostsHandler);
+app.get("/api/social/saves", communitySavedPostsHandler);
+app.post("/community/posts/:id/save", communitySaveHandler);
+app.post("/api/community/posts/:id/save", communitySaveHandler);
+app.post("/social/content/:id/save", communitySaveHandler);
+app.post("/api/social/content/:id/save", communitySaveHandler);
 app.post("/community/posts/:id/view", communityViewHandler);
 app.post("/api/community/posts/:id/view", communityViewHandler);
+app.post("/social/content/:id/view", communityViewHandler);
+app.post("/api/social/content/:id/view", communityViewHandler);
 app.get("/community/posts/:id/comments", communityCommentsHandler);
 app.get("/api/community/posts/:id/comments", communityCommentsHandler);
+app.get("/social/content/:id/comments", communityCommentsHandler);
+app.get("/api/social/content/:id/comments", communityCommentsHandler);
 app.post("/community/posts/:id/comments", createCommunityCommentHandler);
 app.post("/api/community/posts/:id/comments", createCommunityCommentHandler);
+app.post("/social/content/:id/comments", createCommunityCommentHandler);
+app.post("/api/social/content/:id/comments", createCommunityCommentHandler);
 app.post("/community/posts/:id/report", reportCommunityPostHandler);
 app.post("/api/community/posts/:id/report", reportCommunityPostHandler);
+app.post("/social/content/:id/report", reportCommunityPostHandler);
+app.post("/api/social/content/:id/report", reportCommunityPostHandler);
 app.delete("/community/posts/:id", deleteCommunityPostHandler);
 app.delete("/api/community/posts/:id", deleteCommunityPostHandler);
 app.get("/community/profile/:id", communityProfileHandler);
 app.get("/api/community/profile/:id", communityProfileHandler);
 app.post("/community/profile/:id/follow", communityFollowHandler);
 app.post("/api/community/profile/:id/follow", communityFollowHandler);
+app.post("/social/profile/:id/follow", communityFollowHandler);
+app.post("/api/social/profile/:id/follow", communityFollowHandler);
+app.get("/community/friends", communityFriendsHandler);
+app.get("/api/community/friends", communityFriendsHandler);
+app.post("/community/friends/:id", communityFriendRequestHandler);
+app.post("/api/community/friends/:id", communityFriendRequestHandler);
+app.patch("/community/friends/:id", communityFriendAcceptHandler);
+app.patch("/api/community/friends/:id", communityFriendAcceptHandler);
+app.post("/community/users/:id/block", communityBlockHandler);
+app.post("/api/community/users/:id/block", communityBlockHandler);
+app.get("/community/messages/conversations", communityConversationsHandler);
+app.get("/api/community/messages/conversations", communityConversationsHandler);
+app.post("/community/messages/conversations", communityStartConversationHandler);
+app.post("/api/community/messages/conversations", communityStartConversationHandler);
+app.get("/community/messages/conversations/:id", communityMessagesHandler);
+app.get("/api/community/messages/conversations/:id", communityMessagesHandler);
+app.post("/community/messages/:id/report", communityReportMessageHandler);
+app.post("/api/community/messages/:id/report", communityReportMessageHandler);
+app.post("/community/messages/conversations/:id", communitySendMessageHandler);
+app.post("/api/community/messages/conversations/:id", communitySendMessageHandler);
 app.post("/community/posts/:id/vote", communityPollVoteHandler);
 app.post("/api/community/posts/:id/vote", communityPollVoteHandler);
 app.get("/community/dashboard", communityDashboardHandler);
@@ -7024,14 +7707,34 @@ app.get("/__debug/routes", async (_req, reply) => {
       "/community/posts",
       "/community/media/upload-ticket",
       "/api/community/posts",
+      "/social/feed",
+      "/api/social/feed",
       "/community/posts/:id/like",
       "/api/community/posts/:id/like",
+      "/social/content/:id/like",
+      "/api/social/content/:id/like",
+      "/social/content/:id/reaction",
+      "/api/social/content/:id/reaction",
+      "/community/saves",
+      "/api/community/saves",
+      "/social/saves",
+      "/api/social/saves",
+      "/community/posts/:id/save",
+      "/api/community/posts/:id/save",
+      "/social/content/:id/save",
+      "/api/social/content/:id/save",
       "/community/posts/:id/view",
       "/api/community/posts/:id/view",
+      "/social/content/:id/view",
+      "/api/social/content/:id/view",
       "/community/posts/:id/comments",
       "/api/community/posts/:id/comments",
+      "/social/content/:id/comments",
+      "/api/social/content/:id/comments",
       "/community/posts/:id/report",
       "/api/community/posts/:id/report",
+      "/social/content/:id/report",
+      "/api/social/content/:id/report",
       "/community/posts/:id",
       "/api/community/posts/:id",
       "/admin/community/posts",

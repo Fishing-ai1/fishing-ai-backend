@@ -47,6 +47,10 @@ alter table if exists public.usage_daily enable row level security;
 alter table if exists public.reward_ledger enable row level security;
 alter table if exists public.boat_ai_trip_logs enable row level security;
 
+/*
+  Legacy direct policy statements are retained for history but disabled below.
+  Some existing OceanCore projects were created before every optional table
+  existed, so each policy must be applied only when its table is present.
 drop policy if exists "profiles own rows" on public.profiles;
 create policy "profiles own rows" on public.profiles
   for all to authenticated
@@ -173,3 +177,88 @@ create policy "boat trips own rows" on public.boat_ai_trip_logs
   for all to authenticated
   using ((select auth.uid()) = user_id)
   with check ((select auth.uid()) = user_id);
+*/
+
+do $$
+begin
+  if to_regclass('public.profiles') is not null then
+    execute 'drop policy if exists "profiles own rows" on public.profiles';
+    execute 'create policy "profiles own rows" on public.profiles for all to authenticated using ((select auth.uid()) = id) with check ((select auth.uid()) = id)';
+  end if;
+  if to_regclass('public.account_settings') is not null then
+    execute 'drop policy if exists "account settings own row" on public.account_settings';
+    execute 'create policy "account settings own row" on public.account_settings for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.catches') is not null then
+    execute 'drop policy if exists "catches own rows" on public.catches';
+    execute 'create policy "catches own rows" on public.catches for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.saved_areas') is not null then
+    execute 'drop policy if exists "saved areas own rows" on public.saved_areas';
+    execute 'create policy "saved areas own rows" on public.saved_areas for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.feedback_reports') is not null then
+    execute 'drop policy if exists "feedback own rows" on public.feedback_reports';
+    execute 'create policy "feedback own rows" on public.feedback_reports for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.community_posts') is not null then
+    execute 'drop policy if exists "community public reads" on public.community_posts';
+    execute 'create policy "community public reads" on public.community_posts for select to anon, authenticated using (status = ''active'' and privacy <> ''private'')';
+    execute 'drop policy if exists "community own posts" on public.community_posts';
+    execute 'create policy "community own posts" on public.community_posts for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.community_comments') is not null then
+    execute 'drop policy if exists "community comments readable" on public.community_comments';
+    execute 'create policy "community comments readable" on public.community_comments for select to anon, authenticated using (status = ''active'')';
+    execute 'drop policy if exists "community own comments" on public.community_comments';
+    execute 'create policy "community own comments" on public.community_comments for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.community_likes') is not null then
+    execute 'drop policy if exists "community own likes" on public.community_likes';
+    execute 'create policy "community own likes" on public.community_likes for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.community_reports') is not null then
+    execute 'drop policy if exists "community own reports" on public.community_reports';
+    execute 'create policy "community own reports" on public.community_reports for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.community_follows') is not null then
+    execute 'drop policy if exists "community follows readable" on public.community_follows';
+    execute 'create policy "community follows readable" on public.community_follows for select to anon, authenticated using (true)';
+    execute 'drop policy if exists "community own follows" on public.community_follows';
+    execute 'create policy "community own follows" on public.community_follows for all to authenticated using ((select auth.uid()) = follower_id) with check ((select auth.uid()) = follower_id)';
+  end if;
+  if to_regclass('public.community_poll_votes') is not null then
+    execute 'drop policy if exists "community poll votes readable" on public.community_poll_votes';
+    execute 'create policy "community poll votes readable" on public.community_poll_votes for select to anon, authenticated using (true)';
+    execute 'drop policy if exists "community own poll votes" on public.community_poll_votes';
+    execute 'create policy "community own poll votes" on public.community_poll_votes for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.ai_chat_sessions') is not null then
+    execute 'drop policy if exists "ai sessions own rows" on public.ai_chat_sessions';
+    execute 'create policy "ai sessions own rows" on public.ai_chat_sessions for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.ai_chat_messages') is not null then
+    execute 'drop policy if exists "ai messages own rows" on public.ai_chat_messages';
+    execute 'create policy "ai messages own rows" on public.ai_chat_messages for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.ai_memory') is not null then
+    execute 'drop policy if exists "ai memory own rows" on public.ai_memory';
+    execute 'create policy "ai memory own rows" on public.ai_memory for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.ai_feedback') is not null then
+    execute 'drop policy if exists "ai feedback own rows" on public.ai_feedback';
+    execute 'create policy "ai feedback own rows" on public.ai_feedback for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.usage_daily') is not null then
+    execute 'drop policy if exists "usage own rows" on public.usage_daily';
+    execute 'create policy "usage own rows" on public.usage_daily for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.reward_ledger') is not null then
+    execute 'drop policy if exists "reward ledger own reads" on public.reward_ledger';
+    execute 'create policy "reward ledger own reads" on public.reward_ledger for select to authenticated using ((select auth.uid()) = user_id)';
+  end if;
+  if to_regclass('public.boat_ai_trip_logs') is not null then
+    execute 'drop policy if exists "boat trips own rows" on public.boat_ai_trip_logs';
+    execute 'create policy "boat trips own rows" on public.boat_ai_trip_logs for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id)';
+  end if;
+end $$;

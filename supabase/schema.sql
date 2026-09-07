@@ -141,15 +141,19 @@ create table if not exists public.community_posts (
 
 create table if not exists public.community_post_views (
   post_id uuid not null references public.community_posts(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade,
+  user_id uuid references auth.users(id) on delete cascade,
+  viewer_key text,
   created_at timestamptz not null default now(),
-  primary key (post_id, user_id)
+  constraint community_post_views_identity_check check (user_id is not null or nullif(viewer_key, '') is not null)
 );
 
 alter table public.community_post_views enable row level security;
 revoke all on table public.community_post_views from public, anon, authenticated;
 grant select, insert, delete on table public.community_post_views to service_role;
 create index if not exists community_post_views_post_id_idx on public.community_post_views(post_id);
+create unique index if not exists community_post_views_user_unique_idx on public.community_post_views(post_id, user_id) where user_id is not null;
+create unique index if not exists community_post_views_viewer_key_unique_idx on public.community_post_views(post_id, viewer_key) where viewer_key is not null;
+create index if not exists community_post_views_viewer_key_idx on public.community_post_views(viewer_key);
 
 create table if not exists public.community_comments (
   id uuid primary key default gen_random_uuid(),
