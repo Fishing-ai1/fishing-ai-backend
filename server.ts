@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const BUILD_ID = "OC_BACKEND_2026-06-28_PELAGIC_GRID";
+const BUILD_ID = "OC_BACKEND_2026-09-07_AUTH_REDIRECT_FIX";
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -87,12 +87,35 @@ const STRIPE_PRICE_CREW_MONTHLY = process.env.STRIPE_PRICE_CREW_MONTHLY || "";
 const STRIPE_PRICE_CREW_YEARLY = process.env.STRIPE_PRICE_CREW_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
 const FRONTEND_DIR = process.env.FRONTEND_DIR || path.resolve(process.cwd(), "../fishing-ai-frontend");
+const DEFAULT_PUBLIC_FRONTEND_URL = "https://oceancore-frontend.vercel.app";
 const ALLOWED_ORIGINS = csvEnv(process.env.ALLOWED_ORIGINS || FRONTEND_URL || "");
 const DEFAULT_WEB_ORIGINS = csvEnv(
   process.env.DEFAULT_WEB_ORIGINS || "https://oceancore-frontend.vercel.app"
 );
 const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const TRUST_PROXY = String(process.env.TRUST_PROXY || (IS_PRODUCTION ? "true" : "false")).toLowerCase() !== "false";
+function publicFrontendOrigin(value: string) {
+  try {
+    const url = new URL(normalizeOriginValue(value));
+    const hostname = url.hostname.toLowerCase();
+    const isPrivateAddress =
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1" ||
+      /^10\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname);
+    if (url.protocol !== "https:" || isPrivateAddress) return "";
+    return url.origin;
+  } catch {
+    return "";
+  }
+}
+// Auth emails must always return people to the public web app. Set AUTH_REDIRECT_URL
+// only when moving production to a verified new public frontend domain.
+const AUTH_REDIRECT_BASE_URL =
+  publicFrontendOrigin(envValue("AUTH_REDIRECT_URL") || envValue("PUBLIC_FRONTEND_URL")) ||
+  DEFAULT_PUBLIC_FRONTEND_URL;
 const SECURITY_HEADERS_ENABLED = String(process.env.SECURITY_HEADERS || "true").toLowerCase() !== "false";
 const RATE_LIMITS_ENABLED = String(process.env.RATE_LIMITS || "true").toLowerCase() !== "false";
 const GEOCODE_SEARCH_URL = envValue("GEOCODE_SEARCH_URL") || "https://nominatim.openstreetmap.org/search";
@@ -2933,6 +2956,7 @@ app.get("/health", async (_req, reply) => {
     auth_api_configured: !!(SUPABASE_URL && SUPABASE_AUTH_API_KEY),
     auth_api_key_present: !!SUPABASE_AUTH_API_KEY,
     supabase_url_present: !!SUPABASE_URL,
+    auth_email_redirect_origin: AUTH_REDIRECT_BASE_URL,
     openai: !!openai,
     windy_point_forecast_configured: !!WINDY_POINT_FORECAST_KEY,
     windy_key_source: WINDY_KEY_SOURCE,
@@ -3133,21 +3157,29 @@ app.post("/auth/signup", async (req, reply) => {
   }
 });
 
+function getAuthEmailRedirectUrl(requestedRedirect: string) {
+  // A recovery email can be opened days later, often on another device. Never
+  // trust a submitted redirect in production because cached/local clients can
+  // otherwise send people to localhost or a private network address.
+  if (IS_PRODUCTION) return `${AUTH_REDIRECT_BASE_URL}/`;
+
+  const requested = normalizeOriginValue(requestedRedirect);
+  if (/^https?:\/\//i.test(requested)) return `${requested}/`;
+  return `${AUTH_REDIRECT_BASE_URL}/`;
+}
+
 app.post("/auth/reset-password", async (req, reply) => {
   try {
     const body = (req.body || {}) as any;
     const email = str(body.email);
-    const redirect_to = str(body.redirect_to || body.redirectTo);
+    const redirect_to = getAuthEmailRedirectUrl(str(body.redirect_to || body.redirectTo));
 
     if (!email) {
       reply.code(400).send({ success: false, error: "email is required" });
       return;
     }
 
-    await callSupabaseAuth("/recover", {
-      email,
-      ...(redirect_to ? { redirect_to } : {}),
-    });
+    await callSupabaseAuth("/recover", { email, redirect_to });
 
     ok(reply, {
       success: true,
@@ -3162,7 +3194,7 @@ app.post("/auth/magic-link", async (req, reply) => {
   try {
     const body = (req.body || {}) as any;
     const email = str(body.email);
-    const redirect_to = str(body.redirect_to || body.redirectTo);
+    const redirect_to = getAuthEmailRedirectUrl(str(body.redirect_to || body.redirectTo));
 
     if (!email) {
       reply.code(400).send({ success: false, error: "email is required" });
@@ -3172,7 +3204,7 @@ app.post("/auth/magic-link", async (req, reply) => {
     await callSupabaseAuth("/otp", {
       email,
       create_user: false,
-      ...(redirect_to ? { redirect_to } : {}),
+      redirect_to,
     });
 
     ok(reply, {

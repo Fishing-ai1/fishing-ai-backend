@@ -56,6 +56,7 @@ SUPABASE_ANON_KEY=
 OPENAI_API_KEY=
 WINDY_POINT_FORECAST_KEY=
 FRONTEND_URL=
+AUTH_REDIRECT_URL=https://oceancore-frontend.vercel.app
 ALLOWED_ORIGINS=https://oceancore-frontend.vercel.app
 DEFAULT_WEB_ORIGINS=https://oceancore-frontend.vercel.app
 ADMIN_EMAILS=
