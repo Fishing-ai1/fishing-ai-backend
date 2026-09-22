@@ -1,0 +1,13 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Regional form test fixture</title>
+<link rel="stylesheet" href="/assets/control-centre.css"><main><h1>Regional form fixture</h1>
+<button id="btnSaveCatch">Submit catch fixture</button><div class="fld"><input id="savedAreaName" aria-label="Saved area name"></div><button id="boatAiSaveTrip">Submit trip fixture</button><div class="fld"><label>Fuel litres</label><input id="boatAiFuel" value="3.785411784"></div><div id="boatAiMetrics"></div><pre id="result" role="status"></pre></main>
+<script>
+const state={token:'local-test-owner'};
+function currentCatchUnits(){return 'imperial';}
+async function api(path,options={}){
+ if(options.method==='POST'){document.getElementById('result').textContent=JSON.stringify({path,body:JSON.parse(options.body)});return {};}
+ const response=await fetch(path,{headers:{Authorization:'Bearer local-test-owner'}});if(!response.ok)throw Error('Fixture API failed');return response.json();
+}
+document.getElementById('btnSaveCatch').onclick=()=>api('/catches',{method:'POST',body:JSON.stringify({species:'Fixture fish',lat:null,lng:null})});
+document.getElementById('boatAiSaveTrip').onclick=()=>api('/api/boat/trip-log',{method:'POST',body:JSON.stringify({trip_log:{boat_name:'Fixture boat'}})});
+</script><script src="/assets/event-location.js" defer></script><script src="/assets/boat-units.js" defer></script></html>

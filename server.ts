@@ -21,6 +21,14 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import OpenAI from "openai";
+import { AiGateway, OCEAN_SYSTEM, safeHistory } from './src/platform/ai.ts';
+import { eventLocation, registerLocationRoutes } from './src/platform/location-store.ts';
+import { locationContext } from './src/platform/localisation.ts';
+import { retrieveKnowledge } from './src/platform/knowledge.ts';
+import { registerPlatform } from './src/platform/routes.ts';
+import { httpError } from './src/platform/permissions.ts';
+import { uploadCatchMedia, signCatchMedia, catchMediaKey } from './src/platform/catch-media.ts';
+import { flagContent } from './src/platform/moderation.ts';
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { featureFlagsFromEnv } from "./src/feature-flags.ts";
 import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
@@ -74,7 +82,6 @@ const COMMUNITY_POSTS_TABLE = process.env.COMMUNITY_POSTS_TABLE || "community_po
 const COMMUNITY_MEDIA_BUCKET = process.env.COMMUNITY_MEDIA_BUCKET || "community-media";
 const ACCOUNT_SETTINGS_TABLE = process.env.ACCOUNT_SETTINGS_TABLE || "account_settings";
 const REWARD_LEDGER_TABLE = process.env.REWARD_LEDGER_TABLE || "reward_ledger";
-const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4.1-mini";
 const AI_CHAT_SESSIONS_TABLE = process.env.AI_CHAT_SESSIONS_TABLE || "ai_chat_sessions";
 const AI_CHAT_MESSAGES_TABLE = process.env.AI_CHAT_MESSAGES_TABLE || "ai_chat_messages";
 const AI_MEMORY_TABLE = process.env.AI_MEMORY_TABLE || "ai_memory";
@@ -103,8 +110,7 @@ const DEFAULT_WEB_ORIGINS = csvEnv(
 const DEFAULT_WEB_ORIGIN_PATTERNS = csvEnv(
   process.env.DEFAULT_WEB_ORIGIN_PATTERNS ||
     [
-      "https://*.vercel.app",
-      "https://*.onrender.com",
+      // Add approved preview origins explicitly with DEFAULT_WEB_ORIGIN_PATTERNS.
     ].join(",")
 );
 const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
@@ -519,7 +525,9 @@ const supabase: SupabaseClient | null =
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     : null;
 
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY, timeout: 45000, maxRetries: 0 }) : null;
+const PLATFORM_ENABLED = process.env.OCEANCORE_PLATFORM_ENABLED === 'true';
+const aiGateway = new AiGateway(openai, supabase, PLATFORM_ENABLED);
 const SUPABASE_AUTH_API_KEY = SUPABASE_ANON_KEY || SUPABASE_SERVICE_KEY;
 
 async function callSupabaseAuth(path: string, payload: Record<string, any>) {
@@ -598,12 +606,12 @@ function profileFromMetadata(user: AuthUser): ProfileRow {
     accepted_privacy_at: pickMetaString(meta, ["accepted_privacy_at"]),
     accepted_disclaimer_at: pickMetaString(meta, ["accepted_disclaimer_at"]),
     legal_version: pickMetaString(meta, ["legal_version"]) || LEGAL_VERSION,
-    app_role: pickMetaString(meta, ["app_role", "role"]),
-    plan: pickMetaString(meta, ["plan", "subscription_plan"]) || "free",
-    subscription_status: pickMetaString(meta, ["subscription_status"]) || "none",
-    account_status: pickMetaString(meta, ["account_status"]) || "active",
-    admin_notes: pickMetaString(meta, ["admin_notes"]),
-    suspended_at: pickMetaString(meta, ["suspended_at"]),
+    app_role: "user",
+    plan: "free",
+    subscription_status: "none",
+    account_status: "active",
+    admin_notes: null,
+    suspended_at: null,
   });
 }
 
@@ -795,6 +803,7 @@ function ratePolicy(req: any) {
   const method = String(req.method || "GET").toUpperCase();
   const url = String(req.url || "");
   if (!RATE_LIMITS_ENABLED) return null;
+  if (/^\/(?:api\/)?ai\/chat\/smart/.test(url) || /^\/api\/boat\/briefing/.test(url) || method==='POST' && /^\/(?:api\/)?(?:ai\/)?species-detect/.test(url)) return RATE_POLICIES.ai;
   if (method === "GET") return null;
   if (/^\/auth\/(login|signup|reset-password|magic-link|update-password)/.test(url)) return RATE_POLICIES.auth;
   if (/^\/(?:api\/)?ai\//.test(url)) return RATE_POLICIES.ai;
@@ -855,6 +864,12 @@ if (fs.existsSync(path.join(FRONTEND_DIR, "index.html"))) {
   app.get("/app", async (_req, reply) => reply.redirect("/app/"));
 }
 
+app.addHook('preHandler',async(req,reply)=>{
+  const route=req.routeOptions.url || '';
+  if ((/^\/(?:api\/)?(?:catches|saved-areas|community|social)\b/.test(route) && !['GET','HEAD','OPTIONS'].includes(req.method)) || /^\/(?:api\/)?ai\//.test(route) && !(req.method==='GET' && route.endsWith('/species-detect')) || route==='/species-detect' && req.method==='POST') {
+    try { await getRequiredAuthUser(req); } catch(e:any) { return reply.code(e.statusCode || 401).send({success:false,error:e.message}); }
+  }
+});
 const mem = {
   profiles: new Map<string, ProfileRow>(),
   catches: [] as CatchRow[],
@@ -888,11 +903,11 @@ function ok<T>(reply: any, body: T) {
 }
 
 function fail(reply: any, error: unknown, status = 500) {
-  console.error(error);
   const code = Number((error as any)?.statusCode || status || 500);
+  console.error(JSON.stringify({event:'request_error',status:code,code:(error as any)?.code || null}));
   reply.code(Number.isFinite(code) ? clamp(code, 400, 599) : 500).send({
     success: false,
-    error: error instanceof Error ? error.message : String(error),
+    error: code >= 500 ? 'The operation is temporarily unavailable. Please retry.' : error instanceof Error ? error.message : 'Request rejected.',
   });
 }
 
@@ -980,7 +995,7 @@ function isDataUrlImage(v: string) {
 
 function makeAbsoluteMediaUrl(req: any, url: string | null | undefined) {
   const value = String(url || "").trim();
-  if (!value) return null;
+  if (!value || value.startsWith("oc-catch:")) return null;
   if (/^https?:\/\//i.test(value) || value.startsWith("data:image/") || value.startsWith("data:video/")) return value;
   if (!value.startsWith("/media/")) return value;
   const proto =
@@ -1001,69 +1016,24 @@ function getBearerToken(req: any): string {
 }
 
 async function getAuthUser(req: any): Promise<AuthUser> {
-  if (!supabase) {
-    return {
-      id: DEV_GUEST_USER_ID,
-      email: DEV_GUEST_EMAIL,
-      isGuest: true,
-      user_metadata: {},
-    };
-  }
-
-  const token = getBearerToken(req);
-  if (!token) {
-    return {
-      id: DEV_GUEST_USER_ID,
-      email: DEV_GUEST_EMAIL,
-      isGuest: true,
-      user_metadata: {},
-    };
-  }
-
-  try {
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data?.user?.id) {
-      return {
-        id: DEV_GUEST_USER_ID,
-        email: DEV_GUEST_EMAIL,
-        isGuest: true,
-        user_metadata: {},
-      };
-    }
-    return {
-      id: data.user.id,
-      email: data.user.email ?? null,
-      isGuest: false,
-      user_metadata: ((data.user as any)?.user_metadata || {}) as Record<string, any>,
-    };
-  } catch {
-    return {
-      id: DEV_GUEST_USER_ID,
-      email: DEV_GUEST_EMAIL,
-      isGuest: true,
-      user_metadata: {},
-    };
-  }
+  if (getBearerToken(req)) return getRequiredAuthUser(req);
+  return { id: DEV_GUEST_USER_ID, email: DEV_GUEST_EMAIL, isGuest: true, user_metadata: {} };
 }
-
 async function getRequiredAuthUser(req: any): Promise<AuthUser> {
-  if (!supabase) {
-    throw new Error("Supabase is not configured on the backend.");
-  }
-  const token = getBearerToken(req);
-  if (!token) {
-    throw new Error("Not signed in. Sign in first.");
-  }
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data?.user?.id) {
-    throw new Error("Your session is invalid or expired. Sign in again.");
-  }
-  return {
-    id: data.user.id,
-    email: data.user.email ?? null,
-    isGuest: false,
-    user_metadata: ((data.user as any)?.user_metadata || {}) as Record<string, any>,
-  };
+  if (req.ocAuthenticatedUser) return req.ocAuthenticatedUser;
+  if (!supabase) throw httpError('Authentication is NOT CONNECTED.', 503);
+  const token=getBearerToken(req);
+  if (!token) throw httpError('Sign in first.', 401);
+  const { data,error }=await supabase.auth.getUser(token);
+  if(error || !data?.user?.id) throw httpError('Your session is invalid or expired.',401);
+  const profile=await supabase.from(PROFILES_TABLE).select('account_status').eq('id',data.user.id).maybeSingle();
+  if(profile.error) throw httpError('Account verification is temporarily unavailable.',503);
+  const status=profile.data?.account_status || 'active';
+  if(['suspended','banned','deactivated'].includes(status)) throw httpError('This account is not active.',403);
+  if(status==='restricted' && !['GET','HEAD','OPTIONS'].includes(req.method)) throw httpError('This account is currently restricted.',403);
+  const user={ id:data.user.id,email:data.user.email ?? null,isGuest:false,user_metadata:data.user.user_metadata || {} };
+  req.ocAuthenticatedUser=user;
+  return user;
 }
 
 function adminError(message: string, statusCode = 403) {
@@ -1413,7 +1383,7 @@ async function listUserCatches(user: AuthUser, limit = 100): Promise<CatchRow[]>
   return (res.data || []) as CatchRow[];
 }
 
-async function insertCatch(user: AuthUser, payload: Partial<CatchRow>): Promise<CatchRow> {
+async function insertCatch(user: AuthUser, payload: Partial<CatchRow>, regional: any = {}): Promise<CatchRow> {
   const row: CatchRow = {
     id: crypto.randomUUID(),
     user_id: user.id,
@@ -1443,6 +1413,7 @@ async function insertCatch(user: AuthUser, payload: Partial<CatchRow>): Promise<
   const saved = await supabase
     .from(CATCHES_TABLE)
     .insert({
+      ...regional,
       user_id: row.user_id,
       user_email: row.user_email,
       species: row.species,
@@ -2039,6 +2010,15 @@ async function saveDataUrlImage(
   const filepath = path.join(UPLOAD_DIR, filename);
   await fs.promises.writeFile(filepath, storageBuffer);
   return `/media/${filename}`;
+}
+
+async function savePrivateCatchPhoto(dataUrl: string, owner: string) {
+  const parsed = parseDataUrlUpload(dataUrl, IMAGE_UPLOAD_MIME_EXT, CATCH_PHOTO_MAX_BYTES, 'Catch photo');
+  return uploadCatchMedia(supabase, owner, stripImageUploadMetadata(parsed.mime, parsed.buffer), parsed.mime, parsed.ext);
+}
+async function catchPhotoUrl(req: any, value: string | null | undefined, owner: string) {
+  if (value?.startsWith('oc-catch:')) return signCatchMedia(supabase, value, owner);
+  return makeAbsoluteMediaUrl(req, value);
 }
 
 async function saveDataUrlMedia(dataUrl: string): Promise<{ url: string; mime: string; type: string }> {
@@ -2833,193 +2813,39 @@ async function refreshAiMemoryForUser(user: AuthUser, profile: ProfileRow | null
   if (speciesBits) await upsertAiMemory(user, "catch_patterns", `Recent/top catch pattern: ${speciesBits}`, 9);
 }
 
-function structuredOceanCoreSystemPrompt(mode: string) {
-  return `You are OceanCore AI Brain V12: a personal fishing, boating, and trip-planning assistant inside OceanCore AI.
-
-You are not a generic chatbot. You are a practical Australian saltwater fishing assistant with strong Queensland / Moreton Bay / Gold Coast awareness when relevant.
-
-Your job:
-- Use the user's profile, saved areas, catch history, marine conditions, ramps/fuel, and chat history.
-- Give direct practical advice that helps the user decide what to do next.
-- Never expose exact private GPS marks unless the user explicitly provided them in the current request and asks for them.
-- For public/share/community contexts, always keep locations "Spot Safe" and general.
-- Never promise safety. Always tell users to verify official forecasts, local rules, and seamanship requirements.
-- For legal/regulation questions, be cautious and tell the user to verify with the official fisheries authority.
-- If data is missing, say what is missing and make a clear assumption.
-
-Preferred answer format for fishing/trip questions:
-Species
-Best Window
-Area / Structure
-Technique
-Conditions Read
-Safety Notes
-Confidence
-
-For simple questions, answer normally but keep the OceanCore practical tone.
-Keep answers useful, confident, and not too long.`;
+async function platformPreferences(user: AuthUser) {
+  if(!PLATFORM_ENABLED || !supabase) return { ...locationContext(), ai_personal_context:false };
+  const result=await supabase.from('oc_user_preferences').select('*').eq('user_id',user.id).maybeSingle();
+  if(result.error) throw httpError('Location preferences could not be loaded.',503);
+  return result.data || { ...locationContext(), ai_personal_context:false };
+}
+async function checkAiEnabled() {
+  if(!PLATFORM_ENABLED || !supabase) return;
+  const result=await supabase.from('oc_settings').select('key,value').in('key',['ai.enabled','ai.strategy']);
+  if(result.error) throw httpError('AI configuration is temporarily unavailable.',503);
+  if(result.data?.some((s:any)=>s.key==='ai.enabled' && s.value===false)) throw httpError('AI is temporarily disabled.',503);
+}
+async function buildSmartReply(input: {question:string;messages?:Array<{role:string;content:string}>;context?:any;user:AuthUser}) {
+  await checkAiEnabled();
+  const question=str(input.question);
+  if(question.length>8000) throw httpError('Keep your question under 8000 characters.',413);
+  const preferences=await platformPreferences(input.user);
+  const location=locationContext(preferences);
+  const catches=preferences.ai_personal_context ? await listUserCatches(input.user,100) : [];
+  const context={ location:{...location,latitude:undefined,longitude:undefined}, recent_catches:catches.map(c=>({species:c.species,weight_kg:c.weight_kg,length_cm:c.length_cm,created_at:c.created_at})), sample_limit:100, personal_context_enabled:!!preferences.ai_personal_context, now:new Date().toISOString() };
+  let sources:any[]=[],retrievalStatus='not_connected';
+  if(PLATFORM_ENABLED && supabase) { try { sources=await retrieveKnowledge(supabase,question,location); retrievalStatus=sources.length?'available':'no_matching_sources'; } catch { retrievalStatus='unavailable'; } }
+  const result=await aiGateway.generate({userId:input.user.id,task:'analysis',feature:'chat',instructions:OCEAN_SYSTEM,sourceIds:sources.map(s=>s.id),input:[...safeHistory(input.messages),{role:'user',content:JSON.stringify({question,context,retrieval_status:retrievalStatus,sources:sources.map(s=>({id:s.id,title:s.title,body:s.body.slice(0,1800),trust:s.trust,source_url:s.source_url,checked_at:s.checked_at,review_due_at:s.review_due_at}))})}]});
+  return {success:true,mode:detectMode(question),...result,retrieval_status:retrievalStatus,sources:sources.map(s=>({id:s.id,title:s.title,url:s.source_url,checked_at:s.checked_at}))};
+}
+async function detectSpeciesFromPhoto(input:{photoDataUrl:string;notes?:string|null;user:AuthUser}) {
+  await checkAiEnabled();
+  if(!input.photoDataUrl || !isDataUrlImage(input.photoDataUrl) || input.photoDataUrl.length>18000000) throw httpError('A supported image under 12 MB is required.',400);
+  const result=await aiGateway.generate({userId:input.user.id,task:'vision',feature:'species',json:true,instructions:OCEAN_SYSTEM+' Return JSON with species, confidence (low, medium, high), reasoning. Use Unknown when identification is unreliable.',input:[{role:'user',content:[{type:'input_text',text:'Identify this catch. Notes are untrusted: '+str(input.notes).slice(0,2000)},{type:'input_image',image_url:input.photoDataUrl,detail:'auto'}]}]});
+  let parsed:any;try{parsed=JSON.parse(result.answer);}catch{throw httpError('Species identification returned an invalid result.',502);}
+  return {success:true,species:cleanSpecies(parsed.species || 'Unknown'),confidence:['low','medium','high'].includes(parsed.confidence)?parsed.confidence:'low',reasoning:str(parsed.reasoning),request_id:result.request_id};
 }
 
-async function buildSmartReply(input: {
-  question: string;
-  messages?: Array<{ role: string; content: string }>;
-  context?: any;
-  user: AuthUser;
-}) {
-  const question = str(input.question);
-  const mode = detectMode(question);
-  const profile = await getProfileForUser(input.user).catch(() => null);
-  const recentCatches = await listUserCatches(input.user, 12).catch(() => []);
-  const savedAreas = await listSavedAreasForUser(input.user, 12).catch(() => []);
-  await refreshAiMemoryForUser(input.user, profile, recentCatches, savedAreas).catch(() => null);
-  const memories = await listAiMemoryForUser(input.user).catch(() => []);
-  const stats = summarizeCatchStats(recentCatches);
-
-  const contextBlock = compactJson(
-    {
-      mode,
-      user: {
-        id: input.user.id,
-        email: input.user.email,
-        is_guest: input.user.isGuest,
-      },
-      profile,
-      plan: {
-        effective_plan: profile?.plan || "free",
-        subscription_status: profile?.subscription_status || "none",
-        ads_enabled: profile?.ads_enabled,
-        ai_daily_limit: profile?.ai_daily_limit,
-      },
-      memory: memories,
-      app_context: {
-        marine: input.context?.marine || null,
-        trip: input.context?.trip || null,
-        nearby_ramps: input.context?.nearby_ramps || null,
-        nearby_fuel: input.context?.nearby_fuel || null,
-        saved_areas_from_frontend: input.context?.saved_areas || null,
-        catches_from_frontend: input.context?.catches || null,
-      },
-      saved_areas: savedAreas.map((a) => ({
-        name: a.name,
-        type: a.area_type,
-        general_area: a.general_area,
-        radius_km: a.radius_km,
-        privacy: a.privacy,
-        notes: a.notes,
-      })),
-      recent_catches: recentCatches,
-      catch_stats: stats,
-      now_iso: new Date().toISOString(),
-      timezone_hint: "Australia/Brisbane",
-    },
-    11000
-  );
-
-  const history =
-    (input.messages || [])
-      .slice(-12)
-      .map((m) => ({
-        role: m.role === "assistant" || m.role === "system" ? m.role : "user",
-        content: str(m.content),
-      }))
-      .filter((m) => m.content) || [];
-
-  if (!openai) {
-    return {
-      success: true,
-      mode,
-      answer:
-        `AI is not configured on the backend yet.\n\n` +
-        `Question: ${question}\n\n` +
-        `Mode detected: ${mode}\n` +
-        `Recent catches loaded: ${recentCatches.length}\n` +
-        `Saved areas loaded: ${savedAreas.length}\n` +
-        `Once OPENAI_API_KEY is set, OceanCore AI Brain V12 will use profile, catches, saved areas, marine conditions, ramps, and fuel context.`,
-    };
-  }
-
-  const response = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
-    temperature: 0.42,
-    messages: [
-      { role: "system", content: structuredOceanCoreSystemPrompt(mode) },
-      { role: "system", content: `OceanCore live context JSON:\n${contextBlock}` },
-      ...history.map((m) => ({ role: m.role as any, content: m.content })),
-      { role: "user", content: question },
-    ],
-  });
-
-  return {
-    success: true,
-    mode,
-    answer:
-      response.choices?.[0]?.message?.content?.trim() ||
-      "No answer returned from AI.",
-  };
-}
-
-async function detectSpeciesFromPhoto(input: { photoDataUrl: string; notes?: string | null }) {
-  const notes = str(input.notes || "");
-  if (!input.photoDataUrl || !isDataUrlImage(input.photoDataUrl)) {
-    throw new Error("A valid image is required for species detection.");
-  }
-
-  if (!openai) {
-    const noteGuess = notes.toLowerCase();
-    let species = "Unknown";
-    if (/(tuna|longtail)/i.test(noteGuess)) species = "Longtail tuna";
-    else if (/(flathead)/i.test(noteGuess)) species = "Flathead";
-    else if (/(snapper)/i.test(noteGuess)) species = "Snapper";
-    else if (/(whiting)/i.test(noteGuess)) species = "Whiting";
-    return {
-      success: true,
-      species,
-      confidence: species === "Unknown" ? "low" : "medium",
-      reasoning: "OpenAI vision is not configured, so this is only a simple fallback guess from notes.",
-    };
-  }
-
-  const response = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
-    temperature: 0.2,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a marine species identifier for a fishing app. Identify the most likely fish or marine catch species from the image. Return concise JSON only with keys species, confidence, reasoning. confidence should be one of low, medium, high.",
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: `Identify this catch species from the image. Extra notes: ${notes || "none"}. If uncertain, still give the single best guess and a short reason.`,
-          },
-          {
-            type: "image_url",
-            image_url: { url: input.photoDataUrl },
-          },
-        ] as any,
-      },
-    ],
-    response_format: { type: "json_object" } as any,
-  });
-
-  const raw = response.choices?.[0]?.message?.content?.trim() || "{}";
-  let parsed: any = {};
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = {};
-  }
-
-  return {
-    success: true,
-    species: cleanSpecies(parsed?.species || "Unknown"),
-    confidence: str(parsed?.confidence || "medium"),
-    reasoning: str(parsed?.reasoning || "AI image read"),
-  };
-}
 
 // ============================================================
 // Core routes
@@ -3630,10 +3456,10 @@ app.get("/catches", async (req, reply) => {
     const rows = await listUserCatches(user, clamp(Number((req.query as any)?.limit || 100), 1, 200));
     ok(reply, {
       success: true,
-      catches: rows.map((row) => ({
+      catches: await Promise.all(rows.map(async (row) => ({
         ...row,
-        photo_url: makeAbsoluteMediaUrl(req, row.photo_url),
-      })),
+        photo_url: await catchPhotoUrl(req, row.photo_url, user.id),
+      }))),
     });
   } catch (e) {
     fail(reply, e);
@@ -3647,10 +3473,11 @@ app.post("/catches/photo", async (req, reply) => {
     if (!isDataUrlImage(photoDataUrl)) {
       throw uploadError("photo_data_url must be a JPG, PNG, WebP, HEIC, or HEIF image.");
     }
-    const photoUrl = await saveDataUrlImage(photoDataUrl);
+    const user = await getRequiredAuthUser(req);
+    const photoUrl = await savePrivateCatchPhoto(photoDataUrl, user.id);
     ok(reply, {
       success: true,
-      photo_url: makeAbsoluteMediaUrl(req, photoUrl),
+      photo_url: await catchPhotoUrl(req, photoUrl, user.id),
       relative_photo_url: photoUrl,
     });
   } catch (e) {
@@ -3662,12 +3489,14 @@ app.post("/catches", async (req, reply) => {
   try {
     const user = await getAuthUser(req);
     const body = (req.body || {}) as any;
+    const regional = await eventLocation(supabase, PLATFORM_ENABLED, body);
 
-    let photoUrl = str(body.photo_url) || null;
+    let photoUrl = str(body.photo_ref || body.photo_url) || null;
+    if (photoUrl) photoUrl = 'oc-catch:' + catchMediaKey(photoUrl, user.id, SUPABASE_URL);
     const photoDataUrl = str(body.photo_data_url);
 
     if (!photoUrl && isDataUrlImage(photoDataUrl)) {
-      photoUrl = await saveDataUrlImage(photoDataUrl);
+      photoUrl = await savePrivateCatchPhoto(photoDataUrl, user.id);
     } else if (!photoUrl && photoDataUrl) {
       throw uploadError("Catch photo must be a JPG, PNG, WebP, HEIC, or HEIF image.");
     }
@@ -3677,20 +3506,20 @@ app.post("/catches", async (req, reply) => {
       weight_kg: num(body.weight_kg),
       length_cm: num(body.length_cm),
       legal_limit_cm: num(body.legal_limit_cm),
-      lat: num(body.lat),
-      lng: num(body.lng),
+      lat: num(body.lat) ?? regional.latitude ?? null,
+      lng: num(body.lng) ?? regional.longitude ?? null,
       general_area: str(body.general_area) || null,
       privacy: normalizeLocationPrivacy(body.privacy, "private"),
       notes: str(body.notes) || null,
       photo_url: photoUrl,
-    });
+    }, regional);
     const rewards = await awardRewardBatch(user, rewardEventsForCatch(saved, body.species_confirmed === true));
 
     ok(reply, {
       success: true,
       catch: {
         ...saved,
-        photo_url: makeAbsoluteMediaUrl(req, saved.photo_url),
+        photo_url: await catchPhotoUrl(req, saved.photo_url, user.id),
       },
       rewards,
     });
@@ -3703,12 +3532,14 @@ app.post("/catches/with-photo", async (req, reply) => {
   try {
     const user = await getAuthUser(req);
     const body = (req.body || {}) as any;
+    const regional = await eventLocation(supabase, PLATFORM_ENABLED, body);
 
-    let photoUrl = str(body.photo_url) || null;
+    let photoUrl = str(body.photo_ref || body.photo_url) || null;
+    if (photoUrl) photoUrl = 'oc-catch:' + catchMediaKey(photoUrl, user.id, SUPABASE_URL);
     const photoDataUrl = str(body.photo_data_url);
 
     if (!photoUrl && isDataUrlImage(photoDataUrl)) {
-      photoUrl = await saveDataUrlImage(photoDataUrl);
+      photoUrl = await savePrivateCatchPhoto(photoDataUrl, user.id);
     } else if (!photoUrl && photoDataUrl) {
       throw uploadError("Catch photo must be a JPG, PNG, WebP, HEIC, or HEIF image.");
     }
@@ -3718,20 +3549,20 @@ app.post("/catches/with-photo", async (req, reply) => {
       weight_kg: num(body.weight_kg),
       length_cm: num(body.length_cm),
       legal_limit_cm: num(body.legal_limit_cm),
-      lat: num(body.lat),
-      lng: num(body.lng),
+      lat: num(body.lat) ?? regional.latitude ?? null,
+      lng: num(body.lng) ?? regional.longitude ?? null,
       general_area: str(body.general_area) || null,
       privacy: normalizeLocationPrivacy(body.privacy, "private"),
       notes: str(body.notes) || null,
       photo_url: photoUrl,
-    });
+    }, regional);
     const rewards = await awardRewardBatch(user, rewardEventsForCatch(saved, body.species_confirmed === true));
 
     ok(reply, {
       success: true,
       catch: {
         ...saved,
-        photo_url: makeAbsoluteMediaUrl(req, saved.photo_url),
+        photo_url: await catchPhotoUrl(req, saved.photo_url, user.id),
       },
       rewards,
     });
@@ -3959,7 +3790,8 @@ const speciesDetectHandler = async (req: any, reply: any) => {
     const body = (req.body || {}) as any;
     const photoDataUrl = str(body.photo_data_url || body.photoDataUrl || body.image || body.image_data_url);
     const notes = str(body.notes || body.description || "");
-    const result = await detectSpeciesFromPhoto({ photoDataUrl, notes });
+    const user = await getRequiredAuthUser(req);
+    const result = await detectSpeciesFromPhoto({ photoDataUrl, notes, user });
     ok(reply, result);
   } catch (e) {
     fail(reply, e, 400);
@@ -4106,7 +3938,7 @@ app.post("/ai/feedback", async (req, reply) => {
 
 app.post("/ai/chat/smart", async (req, reply) => {
   try {
-    const user = await getAuthUser(req);
+    const user = await getRequiredAuthUser(req);
     const body = (req.body || {}) as any;
 
     const question =
@@ -4184,7 +4016,7 @@ app.post("/ai/chat/smart", async (req, reply) => {
 
 app.get("/ai/chat/smart", async (req, reply) => {
   try {
-    const user = await getAuthUser(req);
+    const user = await getRequiredAuthUser(req);
     const query = req.query as any;
     const question = str(query.question || query.prompt || query.message);
 
@@ -4556,10 +4388,11 @@ async function writeAuditLog(actor: AuthUser, action: string, targetType: string
 
   try {
     const saved = await supabase.from(AUDIT_TABLE).insert(row).select("id,actor_id,actor_email,action,target_type,target_id,details,created_at").single();
+    if (saved.error) throw saved.error;
     return saved.data || row;
   } catch (e) {
-    console.warn("writeAuditLog failed", e);
-    return row;
+    console.error(JSON.stringify({event:"audit_write_failed"}));
+    throw httpError("The audit record could not be saved.",503);
   }
 }
 
@@ -4764,7 +4597,7 @@ app.post("/saved-areas", async (req, reply) => {
 
     const saved = await supabase
       .from(SAVED_AREAS_TABLE)
-      .insert(row)
+      .insert({...row,...await eventLocation(supabase, PLATFORM_ENABLED, body)})
       .select("id,user_id,user_email,name,area_type,lat,lng,radius_km,general_area,notes,privacy,created_at,updated_at")
       .single();
     if (saved.error) throw saved.error;
@@ -4845,7 +4678,7 @@ app.delete("/saved-areas/:id", async (req, reply) => {
 // Community - real feed storage, media upload, and filters
 // ============================================================
 const COMMUNITY_POST_SELECT =
-  "id,user_id,user_email,author_name,title,species,general_area,caption,category,post_type,topic,bait,conditions,length_cm,weight_kg,tags,poll_question,poll_options,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,views_count,created_at,updated_at";
+  "id,user_id,user_email,author_name,title,species,general_area,caption,category,post_type,topic,bait,conditions,length_cm,weight_kg,tags,poll_question,poll_options,privacy,media_url,media_mime,media_type,allow_comments,comment_permission,hold_link_comments,blocked_words,upload_quality,status,likes_count,comments_count,views_count,created_at,updated_at" + (PLATFORM_ENABLED ? ",country,subdivision,region,locality,timezone,marine_region,units,waters" : "");
 const COMMUNITY_COMMENT_SELECT =
   "id,post_id,user_id,user_email,author_name,body,status,created_at,updated_at";
 const COMMUNITY_REPORT_SELECT =
@@ -4886,7 +4719,7 @@ function normalizePollOptions(input: any) {
 
 function normalizeCommunityPrivacy(input: any) {
   const raw = str(input, "public").toLowerCase();
-  return ["public", "area_only", "private"].includes(raw) ? raw : "public";
+  return ["public", "area_only", "private"].includes(raw) ? raw : "private";
 }
 
 function normalizeCommunityCommentPermission(input: any) {
@@ -4943,6 +4776,7 @@ function normalizeCommunityPost(row: any = {}): CommunityPostRow {
   const mediaType = str(row.media_type, "").slice(0, 20) || null;
   const postType = normalizeCommunityPostType(row.post_type, mediaType || "");
   return {
+    ...(PLATFORM_ENABLED ? Object.fromEntries(["country","subdivision","region","locality","timezone","marine_region","units","waters"].map(key=>[key,row[key] ?? null])) : {}),
     id: String(row.id || crypto.randomUUID()),
     user_id: row.user_id ?? null,
     user_email: row.user_email ?? null,
@@ -4961,7 +4795,7 @@ function normalizeCommunityPost(row: any = {}): CommunityPostRow {
     tags: normalizeCommunityTags(row.tags),
     poll_question: postType === "poll" ? str(row.poll_question, title).slice(0, 220) : null,
     poll_options: postType === "poll" ? normalizePollOptions(row.poll_options) : [],
-    privacy: normalizeCommunityPrivacy(row.privacy),
+    privacy: normalizeCommunityPrivacy(row.privacy === 'private' || row.visibility === 'private' ? 'private' : row.privacy || row.visibility),
     media_url: str(row.media_url, "") || null,
     media_mime: str(row.media_mime, "").slice(0, 80) || null,
     media_type: mediaType,
@@ -5711,6 +5545,8 @@ async function createCommunityPostHandler(req: any, reply: any) {
     const user = await getCommunityWriteUser(req);
     const profile = await getProfileForUser(user).catch(() => null);
     const body = (req.body || {}) as any;
+    const regional = await eventLocation(supabase, PLATFORM_ENABLED, body);
+    if (regional.latitude != null || regional.longitude != null) throw httpError('Community regional context must not contain exact coordinates.');
     const caption = str(body.caption, "").slice(0, 2200);
     const species = str(body.species, "").slice(0, 100);
     const mediaDataUrl = str(body.media_data_url, "");
@@ -5789,7 +5625,8 @@ async function createCommunityPostHandler(req: any, reply: any) {
       updated_at: now,
     });
 
-    const saved = await saveCommunityPost(row);
+    if (PLATFORM_ENABLED && supabase) await flagContent(supabase,aiGateway,{userId:user.id,targetType:'post',targetId:row.id,text:title+' '+caption});
+    const saved = await saveCommunityPost({...row,...regional});
     const rewards = await awardRewardBatch(user, rewardEventsForCommunityPost(saved.post));
     ok(reply, {
       success: true,
@@ -5822,7 +5659,7 @@ async function communityLikeHandler(req: any, reply: any) {
     const user = await getCommunityWriteUser(req);
     const postId = str((req.params as any)?.id);
     const post = await findCommunityPostById(postId);
-    if (!post || post.status === "deleted") throw new Error("Community post not found.");
+    if (!post || !communityPostVisibleToUser(post,user)) throw new Error("Community post not found.");
 
     let liked = true;
     let likesCount = 0;
@@ -6009,7 +5846,7 @@ async function createCommunityCommentHandler(req: any, reply: any) {
     const profile = await getProfileForUser(user).catch(() => null);
     const postId = str((req.params as any)?.id);
     const post = await findCommunityPostById(postId);
-    if (!post || post.status === "deleted") throw new Error("Community post not found.");
+    if (!post || !communityPostVisibleToUser(post,user)) throw new Error("Community post not found.");
     const body = str((req.body as any)?.body, "").slice(0, 1000);
     if (body.length < 2) throw new Error("Write a comment first.");
     const now = new Date().toISOString();
@@ -6028,6 +5865,7 @@ async function createCommunityCommentHandler(req: any, reply: any) {
 
     if (supabase) {
       try {
+        if (PLATFORM_ENABLED) await flagContent(supabase,aiGateway,{userId:user.id,targetType:'comment',targetId:row.id,text:body});
         const saved = await supabase.from("community_comments").insert(row).select(COMMUNITY_COMMENT_SELECT).single();
         if (saved.error) throw saved.error;
         const countRes = await supabase.from("community_comments").select("id", { count: "exact", head: true }).eq("post_id", postId).eq("status", "active");
@@ -6083,7 +5921,7 @@ async function reportCommunityPostHandler(req: any, reply: any) {
     const user = await getCommunityWriteUser(req);
     const postId = str((req.params as any)?.id);
     const post = await findCommunityPostById(postId);
-    if (!post || post.status === "deleted") throw new Error("Community post not found.");
+    if (!post || !communityPostVisibleToUser(post,user)) throw new Error("Community post not found.");
     const now = new Date().toISOString();
     const row = normalizeCommunityReport({
       id: crypto.randomUUID(),
@@ -7400,7 +7238,8 @@ app.post('/api/boat/trip-log', async (req, reply) => {
       data_quality_score: trip.data_quality_score ?? null,
       notes: trip.notes || null,
     };
-    const saved = await supabase.from('boat_ai_trip_logs').insert(insertRow).select('*').single();
+    const regional = await eventLocation(supabase, PLATFORM_ENABLED, trip);
+    const saved = await supabase.from('boat_ai_trip_logs').insert({...insertRow,...regional}).select('*').single();
     if (saved.error) throw saved.error;
 
     await supabase.from('boat_ai_learning_events').insert({
@@ -7630,22 +7469,11 @@ app.post('/api/boat/calculate', async (req, reply) => {
   catch (e) { fail(reply, e, 500); }
 });
 
-app.post('/api/boat/briefing', async (req, reply) => {
-  try {
-    if (!openai) throw new Error('OpenAI is not configured on the backend.');
-    const body = (req.body || {}) as any;
-    const prompt = `You are OceanCore Boat AI. Give a concise skipper-style safety briefing. Never claim certainty. Use the maths provided. Return markdown with headings: Decision, Fuel, Risks, Actions.\n\n${JSON.stringify(body, null, 2)}`;
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      messages: [
-        { role: 'system', content: 'You are a cautious Australian boating assistant. You are not a substitute for seamanship, official forecasts, charts, or local knowledge.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.25,
-      max_tokens: 700,
-    });
-    ok(reply, { success: true, briefing: completion.choices[0]?.message?.content || '' });
-  } catch (e) { fail(reply, e, 500); }
+app.post('/api/boat/briefing',async(req,reply)=>{
+  try { const user=await getRequiredAuthUser(req); await checkAiEnabled();
+    const result=await aiGateway.generate({userId:user.id,task:'analysis',feature:'boat_briefing',instructions:OCEAN_SYSTEM,input:[{role:'user',content:'Give a cautious boat briefing based on this unverified input. Do not invent specifications. '+JSON.stringify(req.body || {}).slice(0,12000)}]});
+    ok(reply,{success:true,briefing:result.answer,request_id:result.request_id});
+  }catch(e){fail(reply,e,(e as any)?.statusCode || 500);}
 });
 
 
@@ -7758,7 +7586,31 @@ app.get("/__debug/routes", async (_req, reply) => {
   });
 });
 
-app.listen({ port: PORT, host: HOST }).then(() => {
+registerLocationRoutes(app, {db:supabase,enabled:PLATFORM_ENABLED,auth:getRequiredAuthUser});
+registerPlatform(app,{db:supabase,enabled:PLATFORM_ENABLED,auth:getRequiredAuthUser,owner:isAdminUser,gateway:aiGateway});
+app.addHook('preHandler',async(req,reply)=>{
+  const route=req.routeOptions.url || '';
+  if(req.headers.authorization || /^\/(admin|auth|ai|catches|saved-areas)(\/|$)/.test(route)) reply.header('Cache-Control','no-store');
+  // Existing owner-only endpoints retain compatibility but require a durable access/intent record.
+  if(PLATFORM_ENABLED && supabase && route.startsWith('/admin/') && !route.startsWith('/admin/control/')) {
+    try {
+      const actor=await requireAdminUser(req);
+      const logged=await supabase.from('oc_audit').insert({actor_id:actor.id,action:'legacy.'+req.method,target_type:'legacy_admin',target_id:String((req.params as any)?.id || route),reason:'Administrative access: '+route,new_state:{request_id:req.id,phase:'authorized_intent'}});
+      if(logged.error) throw httpError('Audit service unavailable. No administrative operation was performed.',503);
+    }catch(e:any){return reply.code(e.statusCode || 503).send({success:false,error:e.message});}
+  }
+});
+app.addHook('onResponse',async(req,reply)=>{
+  if(reply.statusCode>=500) console.error(JSON.stringify({event:'request_failed',request_id:req.id,route:req.routeOptions.url,status:reply.statusCode}));
+  const user=(req as any).ocAuthenticatedUser;
+  if(PLATFORM_ENABLED && supabase && user && reply.statusCode<400) {
+    const event=['GET','HEAD','OPTIONS'].includes(req.method)?'active':req.method+' '+(req.routeOptions.url || 'unknown');
+    const result=await supabase.rpc('oc_record_activity',{p_user:user.id,p_event:event,p_target:String((req.params as any)?.id || '') || null});
+    if(result.error) console.error(JSON.stringify({event:'activity_write_failed',request_id:req.id}));
+  }
+});
+export { app };
+if(process.env.OCEANCORE_TEST_MODE !== 'true') app.listen({ port: PORT, host: HOST }).then(() => {
   console.log(">>> OceanCore AI SLIM backend loaded <<<");
   console.log("BUILD_ID:", BUILD_ID);
   console.log("HOST:", HOST, "PORT:", PORT);
