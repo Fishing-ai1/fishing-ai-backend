@@ -33,7 +33,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { featureFlagsFromEnv } from "./src/feature-flags.ts";
 import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-09-08_SOCIAL_FOUNDATION";
+const BUILD_ID = "OC_BACKEND_2026-09-22_MONETIZATION_FOUNDATION";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
 const feedRankingService = new FeedRankingService();
 
