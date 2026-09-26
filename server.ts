@@ -33,7 +33,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { featureFlagsFromEnv } from "./src/feature-flags.ts";
 import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-09-22_MONETIZATION_FOUNDATION";
+const BUILD_ID = "OC_BACKEND_2026-09-26_LAUNCH_RELIABILITY";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
 const feedRankingService = new FeedRankingService();
 
@@ -535,14 +535,17 @@ async function callSupabaseAuth(path: string, payload: Record<string, any>) {
     throw new Error("Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY.");
   }
 
-  const res = await fetch(`${SUPABASE_URL}/auth/v1${path}`, {
+  const url = new URL(`${SUPABASE_URL}/auth/v1${path}`);
+  const { redirect_to, ...body } = payload;
+  if (redirect_to) url.searchParams.set("redirect_to", String(redirect_to));
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: SUPABASE_AUTH_API_KEY,
       Authorization: `Bearer ${SUPABASE_AUTH_API_KEY}`,
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
 
   const text = await res.text();
@@ -3108,7 +3111,7 @@ app.post("/auth/reset-password", async (req, reply) => {
 
     ok(reply, {
       success: true,
-      message: "Password reset email sent. Open it on this device/browser to set your password.",
+      message: "If an account exists for that email, a reset link has been sent. Use the newest email to choose a new password.",
     });
   } catch (e) {
     fail(reply, e, 400);
@@ -6523,7 +6526,7 @@ async function communityConversationsHandler(req: any, reply: any) {
       : await readLocalCommunityMessages();
     const result = await Promise.all(conversations.sort((a,b) => String(b.last_message_at || b.created_at).localeCompare(String(a.last_message_at || a.created_at))).map(async conversation => {
       const other = members.find((member: any) => member.conversation_id === conversation.id && member.user_id !== user.id)?.user_id || null;
-      const latest = messageRows.filter(row => row.conversation_id === conversation.id).slice(-1)[0] || null;
+      const latest = messageRows.filter(row => row.conversation_id === conversation.id && (row.status === "active" || (row.status === "held" && row.sender_id === user.id))).slice(-1)[0] || null;
       return { ...conversation, other_user_id: other, other_name: other ? await communityMemberName(other) : "OceanCore conversation", last_message: latest?.body || null };
     }));
     ok(reply, { success: true, conversations: result });
@@ -6580,7 +6583,8 @@ async function communityMessagesHandler(req: any, reply: any) {
     const rows = supabase
       ? await supabase.from("community_messages").select("id,conversation_id,sender_id,body,status,moderation_reason,created_at,updated_at").eq("conversation_id", id).neq("status", "removed").order("created_at", { ascending: true }).then(result => { if (result.error) throw result.error; return result.data || []; })
       : (await readLocalCommunityMessages()).filter(row => row.conversation_id === id && row.status !== "removed");
-    ok(reply, { success: true, messages: rows });
+    const visibleRows = rows.filter((row: CommunityMessageRow) => row.status === "active" || (row.status === "held" && row.sender_id === user.id));
+    ok(reply, { success: true, messages: visibleRows });
   } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
 }
 

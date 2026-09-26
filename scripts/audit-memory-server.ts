@@ -4,8 +4,9 @@ if (process.env.NODE_ENV !== 'test' || process.env.OCEANCORE_TEST_MODE !== 'true
 }
 const { app } = await import('../server.ts');
 app.addHook('onRequest', async (request: any) => {
+  const actor = ['2','3'].includes(request.headers['x-audit-user']) ? request.headers['x-audit-user'] : '1';
   request.ocAuthenticatedUser = {
-    id: '00000000-0000-0000-0000-000000000001',
+    id: '00000000-0000-0000-0000-00000000000'+actor,
     email: 'guest@oceancore.local',
     isGuest: true,
     user_metadata: {},

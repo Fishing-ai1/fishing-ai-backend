@@ -482,6 +482,43 @@ async function checkRewardsMath(baseUrl) {
   }
 }
 
+async function checkTwoUserSocialFlow(baseUrl) {
+  const id = n => "00000000-0000-0000-0000-00000000000"+n;
+  const as = (actor, route, method="GET", body) => request(baseUrl, route, {
+    method,
+    headers: {"Content-Type":"application/json","x-audit-user":String(actor),"Authorization":"Bearer audit-fixture"},
+    ...(body === undefined ? {} : {body:JSON.stringify(body)}),
+  });
+  const denied = async (actor, route, method, body) => {
+    try { await as(actor,route,method,body); }
+    catch(error) { if([403,404].includes(error.status)) return; throw error; }
+    fail("Unauthorized social action was allowed: "+route);
+  };
+  await denied(1,"/community/messages/conversations","POST",{recipient_id:id(2)});
+  await as(1,"/community/friends/"+id(2),"POST",{});
+  const pending = await as(2,"/community/friends");
+  if(!pending.requests.some(row=>row.other_id===id(1)&&row.direction==="incoming")) fail("Recipient did not receive friend request");
+  await denied(3,"/community/friends/"+id(1),"PATCH",{});
+  await as(2,"/community/friends/"+id(1),"PATCH",{});
+  const started=await as(1,"/community/messages/conversations","POST",{recipient_id:id(2)});
+  const route="/community/messages/conversations/"+started.conversation.id;
+  await as(1,route,"POST",{body:"Audit hello from the first member"});
+  const received=await as(2,route);
+  if(!received.messages.some(row=>row.body==="Audit hello from the first member")) fail("Recipient cannot read sent message");
+  const held = await as(1,route,"POST",{body:"Review this https://example.com/offer"});
+  if(!held.held_for_review) fail("Unsafe message was not held");
+  if((await as(2,route)).messages.some(row=>row.id===held.message.id)) fail("Held message leaked to recipient");
+  if(!(await as(1,route)).messages.some(row=>row.id===held.message.id)) fail("Sender cannot see review status");
+  const recipientInbox=await as(2,"/community/messages/conversations");
+  if(recipientInbox.conversations.some(row=>row.last_message===held.message.body)) fail("Held message leaked through preview");
+  await denied(3,route,"GET");
+  await denied(3,route,"POST",{body:"Unrelated member must not send here"});
+  await as(2,"/community/users/"+id(1)+"/block","POST",{});
+  await denied(1,route,"POST",{body:"Blocked message"});
+  await denied(1,"/community/friends/"+id(2),"POST",{});
+}
+
+await check("two-user friendship, messages and third-user isolation", () => runTemporaryMemoryBackend(checkTwoUserSocialFlow));
 await check("frontend integrity", checkFrontendIntegrity);
 await check("frontend/backend route integrity", checkRouteIntegrity);
 await check("Supabase schema integrity", checkSchemaIntegrity);
