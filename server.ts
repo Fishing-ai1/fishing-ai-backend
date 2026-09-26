@@ -1021,6 +1021,9 @@ async function getAuthUser(req: any): Promise<AuthUser> {
 }
 async function getRequiredAuthUser(req: any): Promise<AuthUser> {
   if (req.ocAuthenticatedUser) return req.ocAuthenticatedUser;
+  if (!supabase && !IS_PRODUCTION && process.env.OCEANCORE_AUDIT_MODE === 'true') {
+    return { id: DEV_GUEST_USER_ID, email: DEV_GUEST_EMAIL, isGuest: true, user_metadata: {} };
+  }
   if (!supabase) throw httpError('Authentication is NOT CONNECTED.', 503);
   const token=getBearerToken(req);
   if (!token) throw httpError('Sign in first.', 401);

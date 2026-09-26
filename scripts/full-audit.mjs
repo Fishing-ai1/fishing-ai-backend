@@ -296,6 +296,8 @@ async function runTemporaryMemoryBackend(fn) {
       SUPABASE_SERVICE_KEY: "your-service-key",
       SUPABASE_ANON_KEY: "your-anon-key",
       OPENAI_API_KEY: "your-openai-key",
+      NODE_ENV: "test",
+      OCEANCORE_AUDIT_MODE: "true",
     },
     stdio: "ignore",
     windowsHide: true,
