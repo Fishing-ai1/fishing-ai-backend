@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 // Import the real server without connecting to production or opening a listening socket.
 process.env.OCEANCORE_TEST_MODE='true';process.env.OCEANCORE_PLATFORM_ENABLED='false';
+process.env.OCEANCORE_AUDIT_MODE='true';
 process.env.SUPABASE_URL=' ';process.env.SUPABASE_SERVICE_KEY=' ';process.env.SUPABASE_ANON_KEY=' ';process.env.OPENAI_API_KEY=' ';
 test('existing backend boots and private mutation / AI routes fail closed',async()=>{
  const {app}=await import('../server.ts');

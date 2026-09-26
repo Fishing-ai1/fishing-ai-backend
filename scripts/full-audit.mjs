@@ -1,21 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { fork } from "node:child_process";
+import os from "node:os";
+import { pathToFileURL } from "node:url";
 
-const API_URL = (process.env.API_URL || "http://127.0.0.1:4000").replace(/\/+$/, "");
-const TEMP_PORT = Number(process.env.AUDIT_TEMP_PORT || 4019);
 const backendRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(backendRoot, "..");
 
-const dataFiles = [
-  "community-posts.json",
-  "community-comments.json",
-  "community-reports.json",
-  "community-likes.json",
-  "community-follows.json",
-  "community-poll-votes.json",
-  "reward-ledger.json",
-];
 
 function ok(message) {
   console.log(`ok - ${message}`);
@@ -51,7 +42,7 @@ async function readJsonResponse(res) {
 }
 
 async function request(baseUrl, route, options = {}) {
-  const res = await fetch(`${baseUrl}${route}`, options);
+  const res = await fetch(`${baseUrl}${route}`, { signal: AbortSignal.timeout(30000), ...options });
   const json = await readJsonResponse(res);
   if (!res.ok) {
     const message = json.error || json.message || `HTTP ${res.status}`;
@@ -222,94 +213,45 @@ async function checkBoatMath(baseUrl) {
   return result;
 }
 
-async function snapshotLocalDataFiles() {
-  const dataDir = path.join(backendRoot, "data");
-  const snapshot = new Map();
-  for (const file of dataFiles) {
-    const fullPath = path.join(dataDir, file);
-    try {
-      snapshot.set(file, await fs.readFile(fullPath, "utf8"));
-    } catch {
-      snapshot.set(file, null);
-    }
-  }
-  return snapshot;
-}
-
-async function restoreLocalDataFiles(snapshot) {
-  const dataDir = path.join(backendRoot, "data");
-  await fs.mkdir(dataDir, { recursive: true });
-  for (const [file, contents] of snapshot.entries()) {
-    const fullPath = path.join(dataDir, file);
-    if (contents == null) await fs.rm(fullPath, { force: true });
-    else await fs.writeFile(fullPath, contents, "utf8");
-  }
-}
-
-async function clearLocalDataFiles() {
-  const dataDir = path.join(backendRoot, "data");
-  await fs.mkdir(dataDir, { recursive: true });
-  for (const file of dataFiles) {
-    await fs.rm(path.join(dataDir, file), { force: true });
-  }
-}
-
-function stopPort(port) {
-  if (process.platform !== "win32") return;
-  spawnSync("powershell.exe", [
-    "-NoProfile",
-    "-Command",
-    `$listeners = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue; foreach ($listener in $listeners) { Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue }`,
-  ]);
-}
-
-async function waitForHealth(baseUrl) {
-  const deadline = Date.now() + 15000;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    try {
-      return await request(baseUrl, "/health");
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 400));
-    }
-  }
-  throw lastError || new Error("temporary backend did not start");
-}
-
 async function runTemporaryMemoryBackend(fn) {
-  const snapshot = await snapshotLocalDataFiles();
-  const baseUrl = `http://127.0.0.1:${TEMP_PORT}`;
-  stopPort(TEMP_PORT);
-  await clearLocalDataFiles();
-
-  const tsxCli = path.join(backendRoot, "node_modules", "tsx", "dist", "cli.mjs");
-  const command = process.execPath;
-  const args = [tsxCli, "server.ts"];
-
-  const child = spawn(command, args, {
-    cwd: backendRoot,
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "oceancore-audit-"));
+  const child = fork(path.join(backendRoot, "scripts", "audit-memory-server.ts"), [], {
+    cwd: tempRoot,
+    execArgv: ["--import", pathToFileURL(path.join(backendRoot, "node_modules", "tsx", "dist", "loader.mjs")).href],
     env: {
-      ...process.env,
-      PORT: String(TEMP_PORT),
-      SUPABASE_URL: "your-supabase-url",
-      SUPABASE_SERVICE_KEY: "your-service-key",
-      SUPABASE_ANON_KEY: "your-anon-key",
-      OPENAI_API_KEY: "your-openai-key",
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      TEMP: process.env.TEMP,
+      TMP: process.env.TMP,
       NODE_ENV: "test",
-      OCEANCORE_AUDIT_MODE: "true",
+      OCEANCORE_TEST_MODE: "true",
+      OCEANCORE_PLATFORM_ENABLED: "false",
     },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
     windowsHide: true,
   });
-
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-4000); });
+  const exited = new Promise(resolve => child.once("close", resolve));
   try {
-    await waitForHealth(baseUrl);
+    const baseUrl = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Audit backend startup timed out: " + stderr)), 15000);
+      child.once("message", message => {
+        clearTimeout(timer);
+        if (message?.url) resolve(message.url);
+        else reject(new Error("Invalid audit backend startup response"));
+      });
+      child.once("error", error => { clearTimeout(timer); reject(error); });
+      child.once("exit", code => { clearTimeout(timer); reject(new Error("Audit backend exited: " + code + " " + stderr)); });
+    });
     return await fn(baseUrl);
   } finally {
-    child.kill();
-    stopPort(TEMP_PORT);
-    await restoreLocalDataFiles(snapshot);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+    // Only remove the unique directory created by this audit, never project data.
+    const relative = path.relative(os.tmpdir(), tempRoot);
+    if (!relative.startsWith("oceancore-audit-") || relative.includes(path.sep)) throw new Error("Unexpected audit temp path");
+    await fs.rm(tempRoot, { recursive: true, force: true });
   }
 }
 
@@ -543,7 +485,7 @@ async function checkRewardsMath(baseUrl) {
 await check("frontend integrity", checkFrontendIntegrity);
 await check("frontend/backend route integrity", checkRouteIntegrity);
 await check("Supabase schema integrity", checkSchemaIntegrity);
-await check("Boat AI math on running backend", () => checkBoatMath(API_URL));
+await check("Boat AI math on disposable backend", () => runTemporaryMemoryBackend(checkBoatMath));
 await check("catch privacy on disposable backend", () =>
   runTemporaryMemoryBackend((baseUrl) => checkCatchPrivacy(baseUrl))
 );
