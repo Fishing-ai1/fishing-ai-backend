@@ -20,6 +20,7 @@ import fastifyStatic from "@fastify/static";
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { hydrateCommunityAuthors } from "./community-identity.ts";
 import OpenAI from "openai";
 import { AiGateway, OCEAN_SYSTEM, safeHistory } from './src/platform/ai.ts';
 import { eventLocation, registerLocationRoutes } from './src/platform/location-store.ts';
@@ -5337,6 +5338,15 @@ async function communityFollowingIds(userId: string) {
   return new Set((await readLocalCommunityFollows()).filter((row) => row.follower_id === userId).map((row) => row.following_id));
 }
 
+async function currentCommunityAuthors<T extends { user_id: string; author_name?: string }>(rows: T[]): Promise<T[]> {
+  return hydrateCommunityAuthors(rows, async (ids) => {
+    if (!supabase) return ids.map(id => mem.profiles.get(id)).filter(Boolean) as any[];
+    const result = await supabase.from(PROFILES_TABLE).select("id,full_name,username").in("id", ids);
+    if (result.error) throw result.error;
+    return result.data || [];
+  });
+}
+
 async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{ posts: CommunityPostRow[]; storage: string }> {
   const followingIds = filter === "following" ? await communityFollowingIds(user.id) : new Set<string>();
   const sortPosts = (posts: CommunityPostRow[]) => posts.sort((a, b) => filter === "trending"
@@ -5351,10 +5361,10 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
         .limit(100);
       if (res.error) throw res.error;
       return {
-        posts: sortPosts((res.data || [])
+        posts: await currentCommunityAuthors(sortPosts((res.data || [])
           .map(normalizeCommunityPost)
           .filter((post) => communityPostVisibleToUser(post, user))
-          .filter((post) => communityPostMatchesFilter(post, filter, followingIds))),
+          .filter((post) => communityPostMatchesFilter(post, filter, followingIds)))),
         storage: "supabase",
       };
     } catch (e) {
@@ -5366,7 +5376,7 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
   const comments = await readLocalCommunityComments();
   const likes = await readLocalCommunityLikes();
   return {
-    posts: posts
+    posts: await currentCommunityAuthors(posts
       .map((post) => ({
         ...post,
         comments_count: comments.filter((row) => row.post_id === post.id && row.status === "active").length,
@@ -5376,7 +5386,7 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
       .filter((post) => communityPostMatchesFilter(post, filter, followingIds))
       .sort((a, b) => filter === "trending"
         ? (Number(b.likes_count || 0) * 3 + Number(b.comments_count || 0) * 5) - (Number(a.likes_count || 0) * 3 + Number(a.comments_count || 0) * 5)
-        : String(b.created_at).localeCompare(String(a.created_at))),
+        : String(b.created_at).localeCompare(String(a.created_at)))),
     storage: "local",
   };
 }
@@ -6348,7 +6358,7 @@ async function communityProfileHandler(req: any, reply: any) {
     const speciesCounts = new Map<string, number>();
     catches.forEach((row) => speciesCounts.set(row.species, (speciesCounts.get(row.species) || 0) + 1));
     const largest = catches.sort((a, b) => Number(b.weight_kg || b.length_cm || 0) - Number(a.weight_kg || a.length_cm || 0))[0] || null;
-    const author = posts[0] || null;
+    const [author] = await currentCommunityAuthors([{ user_id: userId, author_name: posts[0]?.author_name || "OceanCore member" }]);
     ok(reply, {
       success: true,
       profile: {
