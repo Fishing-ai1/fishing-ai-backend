@@ -4062,9 +4062,9 @@ type BillingInterval = "monthly" | "yearly";
 
 const PLAN_CATALOG: Record<PlanKey, any> = {
   free: { key: "free", product_id: "oceancore_free", name: "Free", tagline: "Start logging and join the community", monthly_price_aud: 0, yearly_price_aud: 0, price_label: "A$0", ads_enabled: true, ai_daily_limit: 5, saved_area_limit: 3, catch_card_level: "basic", catch_log: "limited/basic", ai: "limited", live_zones: false, delayed_zones: false, game_access: "demo", rewards: "basic", crew: false, features: ["Community feed access", "Upload catches", "Basic catch log", "Basic weather/tide preview", "Limited AI questions", "Demo OceanCore Offshore access", "Ads enabled", "Basic rewards points"], excluded_features: ["Live fishing zones", "Advanced AI pattern memory", "Premium game events", "Crew sharing", "Premium rewards"] },
-  lite: { key: "lite", product_ids: { monthly: "oceancore_lite_monthly", yearly: "oceancore_lite_yearly" }, name: "OceanCore Lite", badge: "Low-cost starter", tagline: "Go ad-light and unlock basic AI", monthly_price_aud: 4.99, yearly_price_aud: 39.99, price_label: "A$4.99/mo", ads_enabled: false, rewarded_ads_allowed: true, ai_daily_limit: 25, saved_area_limit: 12, catch_card_level: "standard", catch_log: "unlimited", ai: "basic/limited", live_zones: false, delayed_zones: true, game_access: "basic", rewards: "basic", crew: false, features: ["No banner ads", "Unlimited catch log", "Basic AI assistant", "Limited AI predictions", "Basic weather/tide tools", "Basic size/legal info", "Basic OceanCore Offshore access", "Delayed fishing zones", "Community Lite badge", "Private catch history"], excluded_features: ["Full live fishing zones", "Full AI pattern memory", "Advanced trip predictions", "Crew sharing", "Premium rewards", "Creator tools"] },
-  premium: { key: "premium", product_ids: { monthly: "oceancore_premium_monthly", yearly: "oceancore_premium_yearly" }, name: "OceanCore Premium", badge: "Most Popular", tagline: "Unlock the full OceanCore fishing brain", monthly_price_aud: 12.99, yearly_price_aud: 99.99, price_label: "A$12.99/mo", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "advanced", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "premium", crew: false, features: ["Everything in Lite", "Full AI fishing assistant", "Full personal catch memory", "Live OceanCore fishing zones", "Best time/species predictions", "Advanced tide/wind/moon pattern analysis", "AI trip planner", "Full OceanCore Offshore access", "Premium game events", "Voucher/giveaway access", "Advanced catch stats"] },
-  crew: { key: "crew", product_ids: { monthly: "oceancore_crew_monthly", yearly: "oceancore_crew_yearly" }, name: "OceanCore Crew", tagline: "For boats, families and fishing mates", monthly_price_aud: 24.99, yearly_price_aud: 219.99, price_label: "A$24.99/mo", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "crew", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "crew/premium", crew: true, users_included: "3 to 5", features: ["Everything in Premium", "3 to 5 users included", "Shared boat profile", "Shared catch log", "Shared trip history", "Shared private marks", "Crew leaderboard", "Shared OceanCore Offshore rewards", "Shared trip planning", "Crew badge"] },
+  lite: { key: "lite", product_ids: { monthly: "oceancore_lite_monthly", yearly: "oceancore_lite_yearly" }, name: "OceanCore Lite", badge: "Low-cost starter", tagline: "Go ad-light and unlock basic AI", monthly_price_aud: 3.74, yearly_price_aud: 29.99, price_label: "A$3.74/mo", ads_enabled: false, rewarded_ads_allowed: true, ai_daily_limit: 25, saved_area_limit: 12, catch_card_level: "standard", catch_log: "unlimited", ai: "basic/limited", live_zones: false, delayed_zones: true, game_access: "basic", rewards: "basic", crew: false, features: ["No banner ads", "Unlimited catch log", "Basic AI assistant", "Limited AI predictions", "Basic weather/tide tools", "Basic size/legal info", "Basic OceanCore Offshore access", "Delayed fishing zones", "Community Lite badge", "Private catch history"], excluded_features: ["Full live fishing zones", "Full AI pattern memory", "Advanced trip predictions", "Crew sharing", "Premium rewards", "Creator tools"] },
+  premium: { key: "premium", product_ids: { monthly: "oceancore_premium_monthly", yearly: "oceancore_premium_yearly" }, name: "OceanCore Premium", badge: "Most Popular", tagline: "Unlock the full OceanCore fishing brain", monthly_price_aud: 9.74, yearly_price_aud: 74.99, price_label: "A$9.74/mo", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "advanced", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "premium", crew: false, features: ["Everything in Lite", "Full AI fishing assistant", "Full personal catch memory", "Live OceanCore fishing zones", "Best time/species predictions", "Advanced tide/wind/moon pattern analysis", "AI trip planner", "Full OceanCore Offshore access", "Premium game events", "Voucher/giveaway access", "Advanced catch stats"] },
+  crew: { key: "crew", product_ids: { monthly: "oceancore_crew_monthly", yearly: "oceancore_crew_yearly" }, name: "OceanCore Crew", tagline: "For boats, families and fishing mates", monthly_price_aud: 18.74, yearly_price_aud: 164.99, price_label: "A$18.74/mo", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "crew", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "crew/premium", crew: true, users_included: "3 to 5", features: ["Everything in Premium", "3 to 5 users included", "Shared boat profile", "Shared catch log", "Shared trip history", "Shared private marks", "Crew leaderboard", "Shared OceanCore Offshore rewards", "Shared trip planning", "Crew badge"] },
   founder: { key: "founder", name: "Founder", price_label: "Internal", ads_enabled: false, ai_daily_limit: 9999, saved_area_limit: 9999, catch_card_level: "founder", catch_log: "unlimited", ai: "full", live_zones: true, delayed_zones: true, game_access: "full", rewards: "crew/premium", crew: true, users_included: "3 to 5", features: ["Full access", "Admin/founder controls", "No ads", "All beta features"] },
 };
 
@@ -4079,8 +4079,23 @@ function normalizePlanKey(plan: any): PlanKey {
   return "free";
 }
 
-function publicPlanCatalog() {
-  return Object.fromEntries(PUBLIC_PLAN_ORDER.map((key) => [key, PLAN_CATALOG[key]]));
+async function subscriptionProducts() {
+  if (!supabase) return [] as any[];
+  const result = await supabase.from("oc_products")
+    .select("product_id,product_key,price_cents,billing_interval,provider_price_id,active,currency")
+    .eq("product_type", "subscription").eq("country", "AU").eq("platform", "web").eq("provider", "stripe");
+  if (result.error) throw result.error;
+  return result.data || [];
+}
+
+function publicPlanCatalog(products: any[] = []) {
+  const plans = Object.fromEntries(PUBLIC_PLAN_ORDER.map((key) => [key, { ...PLAN_CATALOG[key] }]));
+  for (const row of products) {
+    const plan = plans[row.product_key as PlanKey];
+    if (!plan || !PAID_PLAN_KEYS.includes(row.product_key as PlanKey) || !["monthly", "yearly"].includes(row.billing_interval)) continue;
+    plan[`${row.billing_interval}_price_aud`] = row.price_cents / 100;
+  }
+  return plans;
 }
 
 function isPaidStatus(status: any) {
@@ -4258,8 +4273,8 @@ function stripeStatusToAppStatus(status: string) {
   return s || "none";
 }
 
-function stripePricesConfigured() {
-  return {
+function stripePricesConfigured(products: any[] = []) {
+  const configured = {
     lite_monthly: !!STRIPE_PRICE_LITE_MONTHLY,
     lite_yearly: !!STRIPE_PRICE_LITE_YEARLY,
     premium_monthly: !!STRIPE_PRICE_PREMIUM_MONTHLY,
@@ -4267,22 +4282,117 @@ function stripePricesConfigured() {
     crew_monthly: !!STRIPE_PRICE_CREW_MONTHLY,
     crew_yearly: !!STRIPE_PRICE_CREW_YEARLY,
   };
+  for (const row of products) {
+    const key = `${row.product_key}_${row.billing_interval}` as keyof typeof configured;
+    if (key in configured) configured[key] = row.active === true && !!(row.provider_price_id || stripePriceFor(row.product_key, row.billing_interval));
+  }
+  return configured;
+}
+
+async function assertStripePriceMatchesCatalog(priceId: string, expectedCents: number, interval: BillingInterval) {
+  if (!STRIPE_SECRET_KEY) throw new Error("Stripe checkout is not configured.");
+  const response = await fetch(`https://api.stripe.com/v1/prices/${encodeURIComponent(priceId)}`, {
+    headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` },
+  });
+  const price: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(price?.error?.message || "Could not verify the configured Stripe price.");
+  const stripeInterval = interval === "yearly" ? "year" : "month";
+  if (price.active !== true || price.currency !== "aud" || price.unit_amount !== expectedCents || price.recurring?.interval !== stripeInterval) {
+    throw new Error("The configured Stripe price does not match the OceanCore catalogue. Checkout is paused until the price ID is updated.");
+  }
 }
 
 function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) {
   return verifyStripeSignature(rawBody, signatureHeader, STRIPE_WEBHOOK_SECRET);
 }
 
-app.get("/billing/plans", async (_req, reply) => { ok(reply, { success: true, plans: publicPlanCatalog(), plan_order: PUBLIC_PLAN_ORDER, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured() }); });
+app.get("/billing/plans", async (_req, reply) => { try { const products = await subscriptionProducts(); ok(reply, { success: true, plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products) }); } catch (e) { fail(reply, e, 503); } });
 
-app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(), plans: publicPlanCatalog(), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); const products = await subscriptionProducts(); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products), plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 app.get("/billing/usage", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const ai_usage = await getAiUsageStatus(user, profile); ok(reply, { success: true, ai_usage, entitlements: ai_usage.entitlements }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
-app.post("/billing/checkout", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const body = (req.body || {}) as any; const plan = normalizePlanKey(body.plan); const interval = String(body.interval || "monthly").toLowerCase() as BillingInterval; if (!PAID_PLAN_KEYS.includes(plan)) throw new Error("Choose Lite, Premium or Crew plan."); const priceId = stripePriceFor(plan, interval); if (!priceId) throw new Error(`Stripe price ID missing for ${plan} ${interval}. Add the new OceanCore price IDs to backend .env.`); const profile = await getBillingProfile(user); const base = getFrontendBaseUrl(req); const params: Record<string, any> = { mode: "subscription", "line_items[0][price]": priceId, "line_items[0][quantity]": 1, success_url: `${base}/?billing=success&plan=${encodeURIComponent(plan)}`, cancel_url: `${base}/?billing=cancelled`, client_reference_id: user.id, "metadata[user_id]": user.id, "metadata[email]": user.email || "", "metadata[plan]": plan, "metadata[interval]": interval, "metadata[product_id]": PLAN_CATALOG[plan]?.product_ids?.[interval] || "", "subscription_data[metadata][user_id]": user.id, "subscription_data[metadata][email]": user.email || "", "subscription_data[metadata][plan]": plan, "subscription_data[metadata][interval]": interval, "subscription_data[metadata][product_id]": PLAN_CATALOG[plan]?.product_ids?.[interval] || "", allow_promotion_codes: "true" }; if (profile.stripe_customer_id) params.customer = profile.stripe_customer_id; else if (user.email) params.customer_email = user.email; const session = await stripeRequest("/checkout/sessions", params); ok(reply, { success: true, url: session.url, id: session.id, product_id: PLAN_CATALOG[plan]?.product_ids?.[interval] || null }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.post("/billing/checkout", async (req, reply) => {
+  try {
+    const user = await getRequiredAuthUser(req);
+    const body = (req.body || {}) as any;
+    const plan = normalizePlanKey(body.plan);
+    const interval = String(body.interval || "monthly").toLowerCase() as BillingInterval;
+    if (!PAID_PLAN_KEYS.includes(plan) || !["monthly", "yearly"].includes(interval)) throw new Error("Choose a valid Lite, Premium or Crew plan and billing interval.");
+    const products = await subscriptionProducts();
+    const product = products.find((row) => row.product_key === plan && row.billing_interval === interval);
+    if (supabase && (!product || product.active !== true || product.currency !== "AUD")) throw new Error("This OceanCore plan is not available for checkout.");
+    const productId = product?.product_id || PLAN_CATALOG[plan]?.product_ids?.[interval] || "";
+    const priceId = product?.provider_price_id || stripePriceFor(plan, interval);
+    if (!priceId) throw new Error(`Stripe price ID missing for ${plan} ${interval}. Add a verified price ID to the product catalogue.`);
+    const expectedCents = product?.price_cents ?? Math.round(PLAN_CATALOG[plan][`${interval}_price_aud`] * 100);
+    await assertStripePriceMatchesCatalog(priceId, expectedCents, interval);
+    const profile = await getBillingProfile(user);
+    const base = getFrontendBaseUrl(req);
+    const params: Record<string, any> = {
+      mode: "subscription", "line_items[0][price]": priceId, "line_items[0][quantity]": 1,
+      success_url: `${base}/?billing=success&plan=${encodeURIComponent(plan)}`,
+      cancel_url: `${base}/?billing=cancelled`, client_reference_id: user.id,
+      "metadata[user_id]": user.id, "metadata[email]": user.email || "", "metadata[plan]": plan,
+      "metadata[interval]": interval, "metadata[product_id]": productId,
+      "subscription_data[metadata][user_id]": user.id, "subscription_data[metadata][email]": user.email || "",
+      "subscription_data[metadata][plan]": plan, "subscription_data[metadata][interval]": interval,
+      "subscription_data[metadata][product_id]": productId, allow_promotion_codes: "true",
+    };
+    if (profile.stripe_customer_id) params.customer = profile.stripe_customer_id;
+    else if (user.email) params.customer_email = user.email;
+    const session = await stripeRequest("/checkout/sessions", params);
+    ok(reply, { success: true, url: session.url, id: session.id, product_id: productId });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+});
 
 app.post("/billing/portal", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); if (!profile.stripe_customer_id) throw new Error("No Stripe customer found yet. Upgrade first, then billing portal will be available."); const base = getFrontendBaseUrl(req); const session = await stripeRequest("/billing_portal/sessions", { customer: profile.stripe_customer_id, return_url: `${base}/?billing=portal` }); ok(reply, { success: true, url: session.url }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
-app.post("/stripe/webhook", async (req: any, reply) => { try { const rawBody = String(req.rawBody || ""); const sig = String(req.headers?.["stripe-signature"] || ""); if (!verifyStripeWebhookSignature(rawBody, sig)) { reply.code(400).send({ success: false, error: "Invalid Stripe signature" }); return; } const event = req.body || {}; const type = String(event.type || ""); const obj = event.data?.object || {}; if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) { const customerId = String(obj.customer || ""); const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId); if (userId) { let plan = normalizePlanKey(obj.metadata?.plan || ""); if (!PAID_PLAN_KEYS.includes(plan)) plan = normalizePlanKey(stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || ""))); const isDeleted = type === "customer.subscription.deleted"; const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none"); await updateBillingFields(userId, { plan: isDeleted ? "free" : plan, subscription_status: status, stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null, subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null, subscription_cancel_at_period_end: !!obj.cancel_at_period_end }); } } ok(reply, { received: true }); } catch (e) { fail(reply, e, 400); } });
+app.post("/stripe/webhook", async (req: any, reply) => {
+  try {
+    const rawBody = String(req.rawBody || "");
+    const signature = String(req.headers?.["stripe-signature"] || "");
+    if (!verifyStripeWebhookSignature(rawBody, signature)) {
+      reply.code(400).send({ success: false, error: "Invalid Stripe signature" });
+      return;
+    }
+    const event = req.body || {};
+    const type = String(event.type || "");
+    const obj = event.data?.object || {};
+    if (type === "invoice.paid" && Number(obj.amount_paid) > 0) {
+      if (!supabase) throw httpError("Payment ledger is unavailable.", 503);
+      const customerId = String(obj.customer || "");
+      const metadata = obj.parent?.subscription_details?.metadata || obj.subscription_details?.metadata || obj.metadata || {};
+      const userId = String(metadata.user_id || "") || await findUserIdByStripeCustomer(customerId);
+      const products = await subscriptionProducts();
+      const productId = products.some((row) => row.product_id === metadata.product_id) ? metadata.product_id : null;
+      const occurredAt = new Date(Number(event.created) * 1000).toISOString();
+      const receipt = await supabase.rpc("oc_record_provider_receipt", {
+        p_provider: "stripe", p_event_id: String(event.id || ""), p_event_type: type,
+        p_reference: String(obj.id || ""), p_user_id: userId || null, p_product_id: productId,
+        p_amount_cents: Number(obj.amount_paid), p_currency: String(obj.currency || "").toUpperCase(),
+        p_occurred_at: occurredAt,
+      });
+      if (receipt.error) throw receipt.error;
+    }
+    if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) {
+      const customerId = String(obj.customer || "");
+      const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId);
+      if (userId) {
+        let plan = normalizePlanKey(obj.metadata?.plan || "");
+        if (!PAID_PLAN_KEYS.includes(plan)) plan = normalizePlanKey(stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || "")));
+        const isDeleted = type === "customer.subscription.deleted";
+        const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none");
+        await updateBillingFields(userId, {
+          plan: isDeleted ? "free" : plan, subscription_status: status,
+          stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null,
+          subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null,
+          subscription_cancel_at_period_end: !!obj.cancel_at_period_end,
+        });
+      }
+    }
+    ok(reply, { received: true });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+});
 
 // ============================================================
 // Admin / dev dashboard routes
