@@ -33,6 +33,7 @@ import { flagContent } from './src/platform/moderation.ts';
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { featureFlagsFromEnv } from "./src/feature-flags.ts";
 import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
+import { verifyStripeSignature } from "./src/monetization/stripe-signature.ts";
 
 const BUILD_ID = "OC_BACKEND_2026-09-26_LAUNCH_RELIABILITY";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
@@ -4269,14 +4270,7 @@ function stripePricesConfigured() {
 }
 
 function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) {
-  if (!STRIPE_WEBHOOK_SECRET) return true;
-  const parts = Object.fromEntries(String(signatureHeader || "").split(",").map((part) => { const [k, ...rest] = part.split("="); return [k, rest.join("=")]; }));
-  const timestamp = parts.t;
-  const expected = parts.v1;
-  if (!timestamp || !expected) return false;
-  const payload = `${timestamp}.${rawBody}`;
-  const digest = crypto.createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(payload, "utf8").digest("hex");
-  try { return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(expected)); } catch { return false; }
+  return verifyStripeSignature(rawBody, signatureHeader, STRIPE_WEBHOOK_SECRET);
 }
 
 app.get("/billing/plans", async (_req, reply) => { ok(reply, { success: true, plans: publicPlanCatalog(), plan_order: PUBLIC_PLAN_ORDER, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured() }); });
@@ -4288,7 +4282,7 @@ app.post("/billing/checkout", async (req, reply) => { try { const user = await g
 
 app.post("/billing/portal", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); if (!profile.stripe_customer_id) throw new Error("No Stripe customer found yet. Upgrade first, then billing portal will be available."); const base = getFrontendBaseUrl(req); const session = await stripeRequest("/billing_portal/sessions", { customer: profile.stripe_customer_id, return_url: `${base}/?billing=portal` }); ok(reply, { success: true, url: session.url }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
-app.post("/stripe/webhook", async (req: any, reply) => { try { const rawBody = String(req.rawBody || JSON.stringify(req.body || {})); const sig = String(req.headers?.["stripe-signature"] || ""); if (!verifyStripeWebhookSignature(rawBody, sig)) { reply.code(400).send({ success: false, error: "Invalid Stripe signature" }); return; } const event = req.body || {}; const type = String(event.type || ""); const obj = event.data?.object || {}; if (type === "checkout.session.completed") { const userId = String(obj.metadata?.user_id || obj.client_reference_id || ""); const plan = normalizePlanKey(obj.metadata?.plan || "free"); if (userId && PAID_PLAN_KEYS.includes(plan)) { await updateBillingFields(userId, { plan, subscription_status: "active", stripe_customer_id: obj.customer || null, stripe_subscription_id: obj.subscription || null }); } } if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) { const customerId = String(obj.customer || ""); const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId); if (userId) { let plan = normalizePlanKey(obj.metadata?.plan || ""); if (!PAID_PLAN_KEYS.includes(plan)) plan = normalizePlanKey(stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || ""))); const isDeleted = type === "customer.subscription.deleted"; const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none"); await updateBillingFields(userId, { plan: isDeleted ? "free" : plan, subscription_status: status, stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null, subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null, subscription_cancel_at_period_end: !!obj.cancel_at_period_end }); } } ok(reply, { received: true }); } catch (e) { fail(reply, e, 400); } });
+app.post("/stripe/webhook", async (req: any, reply) => { try { const rawBody = String(req.rawBody || ""); const sig = String(req.headers?.["stripe-signature"] || ""); if (!verifyStripeWebhookSignature(rawBody, sig)) { reply.code(400).send({ success: false, error: "Invalid Stripe signature" }); return; } const event = req.body || {}; const type = String(event.type || ""); const obj = event.data?.object || {}; if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) { const customerId = String(obj.customer || ""); const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId); if (userId) { let plan = normalizePlanKey(obj.metadata?.plan || ""); if (!PAID_PLAN_KEYS.includes(plan)) plan = normalizePlanKey(stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || ""))); const isDeleted = type === "customer.subscription.deleted"; const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none"); await updateBillingFields(userId, { plan: isDeleted ? "free" : plan, subscription_status: status, stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null, subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null, subscription_cancel_at_period_end: !!obj.cancel_at_period_end }); } } ok(reply, { received: true }); } catch (e) { fail(reply, e, 400); } });
 
 // ============================================================
 // Admin / dev dashboard routes
