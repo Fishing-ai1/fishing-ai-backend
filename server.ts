@@ -4218,13 +4218,11 @@ function stripePlanFromPrice(priceId: string) {
 }
 
 function getFrontendBaseUrl(req: any) {
-  const configured = String(FRONTEND_URL || "").replace(/\/$/, "");
-  if (configured) return configured;
+  const approved = publicFrontendOrigin(FRONTEND_URL) || AUTH_REDIRECT_BASE_URL;
+  if (IS_PRODUCTION) return approved;
   const origin = String(req?.headers?.origin || "").replace(/\/$/, "");
-  if (origin && /^https?:\/\//i.test(origin)) return origin;
-  const proto = String(req?.headers?.["x-forwarded-proto"] || "http");
-  const host = String(req?.headers?.host || `127.0.0.1:${PORT}`);
-  return `${proto}://${host}`;
+  if (EFFECTIVE_ALLOWED_ORIGINS.includes(origin)) return origin;
+  return approved;
 }
 
 async function stripeRequest(path: string, params: Record<string, any>) {
