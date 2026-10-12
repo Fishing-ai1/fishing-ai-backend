@@ -6541,16 +6541,16 @@ async function communityMemberSearchHandler(req: any, reply: any) {
   try {
     const viewer = await getRequiredAuthUser(req);
     const search = str(req.query?.search, "").trim().replace(/[^\p{L}\p{N} .'-]/gu, "").slice(0, 40);
-    if (search.length < 2) {
+    if (search.length === 1) {
       ok(reply, { success: true, members: [] });
       return;
     }
     if (!supabase) throw httpError("Member search is unavailable.", 503);
-    const matches = await supabase.from(PROFILES_TABLE)
-      .select("id,full_name,username,home_port,account_status")
-      .or(`full_name.ilike.%${search}%,username.ilike.%${search}%`)
-      .neq("id", viewer.id)
-      .limit(20);
+    let lookup = supabase.from(PROFILES_TABLE)
+      .select("id,full_name,username,home_port,account_status,created_at")
+      .neq("id", viewer.id);
+    if (search) lookup = lookup.or(`full_name.ilike.%${search}%,username.ilike.%${search}%`);
+    const matches = await lookup.order("created_at", { ascending: false }).limit(20);
     if (matches.error) throw matches.error;
     const members = (matches.data || [])
       .filter((row: any) => !row.account_status || row.account_status === "active")

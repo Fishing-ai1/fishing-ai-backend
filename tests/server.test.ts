@@ -12,6 +12,8 @@ test('existing backend boots and private mutation / AI routes fail closed',async
    const r=await app.inject({method:'POST',url,payload:{question:'Test'}});
    assert.ok([401,503].includes(r.statusCode),`${url}: ${r.statusCode}`);
   }
+  const members=await app.inject({method:'GET',url:'/api/community/members?search=An'});
+  assert.ok([401,503].includes(members.statusCode),`member search must require authentication: ${members.statusCode}`);
   const platform=await app.inject({method:'GET',url:'/api/platform/status'});assert.equal(platform.statusCode,200);assert.equal(platform.json().connected,false);
   const admin=await app.inject({method:'GET',url:'/admin/control/me'});assert.equal(admin.statusCode,503);
   const frontend=await app.inject({method:'GET',url:'/app/control-centre.html'});assert.equal(frontend.statusCode,200);assert.match(frontend.body,/CONTROL CENTRE/);
