@@ -169,7 +169,7 @@ const EFFECTIVE_ALLOWED_ORIGINS = Array.from(
 );
 const ALLOW_NULL_ORIGIN = String(process.env.ALLOW_NULL_ORIGIN || "").toLowerCase() === "true";
 // During beta, admin can manually assign lite/premium/crew/founder without Stripe being active.
-const BETA_MANUAL_PLAN_ACCESS = String(process.env.BETA_MANUAL_PLAN_ACCESS || "true").toLowerCase() !== "false";
+const BETA_MANUAL_PLAN_ACCESS = String(process.env.BETA_MANUAL_PLAN_ACCESS || "false").toLowerCase() === "true";
 
 // Admin access: set ADMIN_EMAILS in Render to your own login email, comma-separated for multiple admins.
 // Example: ADMIN_EMAILS=you@email.com,founder2@email.com
@@ -4109,9 +4109,8 @@ function effectivePlanFromProfile(profile: any = {}): PlanKey {
   const status = String(profile.subscription_status || "none").toLowerCase();
   if (appRole === "admin" || appRole === "founder" || plan === "founder") return "founder";
 
-  // Beta mode: lets you manually assign Lite/Premium/Crew in Admin without Stripe.
-  // When Stripe goes live, set BETA_MANUAL_PLAN_ACCESS=false if you want paid plans
-  // to require subscription_status active/trial.
+  // Temporary compatibility switch for beta accounts that have not been granted
+  // an explicit entitlement yet.
   if (BETA_MANUAL_PLAN_ACCESS && PAID_PLAN_KEYS.includes(plan)) return plan;
 
   if (PAID_PLAN_KEYS.includes(plan) && isPaidStatus(status)) return plan;
@@ -4122,6 +4121,26 @@ function getPlanEntitlements(profile: any = {}) {
   const effective_plan = effectivePlanFromProfile(profile);
   const base = PLAN_CATALOG[effective_plan] || PLAN_CATALOG.free;
   return { effective_plan, ads_enabled: base.ads_enabled, rewarded_ads_allowed: !!base.rewarded_ads_allowed, ai_daily_limit: base.ai_daily_limit, saved_area_limit: base.saved_area_limit, catch_card_level: base.catch_card_level, catch_log: base.catch_log, ai: base.ai, live_zones: !!base.live_zones, delayed_zones: !!base.delayed_zones, game_access: base.game_access, rewards: base.rewards, crew: !!base.crew, users_included: base.users_included || null, features: base.features };
+}
+
+async function getUserEntitlements(user: AuthUser, profile?: any) {
+  const billingProfile = profile || await getBillingProfile(user);
+  if (!supabase || user.isGuest) return getPlanEntitlements(billingProfile);
+  const result = await supabase.from("oc_entitlements")
+    .select("entitlement_key,provider,status,valid_until,metadata")
+    .eq("user_id", user.id).in("status", ["active", "trial"]);
+  if (result.error) throw result.error;
+  const now = Date.now();
+  const rank: Record<string, number> = { free: 0, lite: 1, premium: 2, crew: 3 };
+  let plan: PlanKey = BETA_MANUAL_PLAN_ACCESS ? effectivePlanFromProfile(billingProfile) : "free";
+  for (const row of result.data || []) {
+    if (row.entitlement_key !== "subscription" || (row.valid_until && Date.parse(row.valid_until) <= now)) continue;
+    const candidate = normalizePlanKey(row.metadata?.plan);
+    if (PAID_PLAN_KEYS.includes(candidate) && rank[candidate] > (rank[plan] || 0)) plan = candidate;
+  }
+  if (["admin", "founder"].includes(String(billingProfile.app_role || "").toLowerCase())) plan = "founder";
+  if (normalizePlanKey(billingProfile.plan) === "founder") plan = "founder";
+  return getPlanEntitlements({ ...billingProfile, plan, subscription_status: "active" });
 }
 
 function todayUsageKey() {
@@ -4178,7 +4197,7 @@ async function incrementAiUsageCount(user: AuthUser, dateKey = todayUsageKey()) 
 
 async function getAiUsageStatus(user: AuthUser, profile?: any) {
   const billingProfile = profile || await getBillingProfile(user);
-  const entitlements = getPlanEntitlements(billingProfile);
+  const entitlements = await getUserEntitlements(user, billingProfile);
   const date = todayUsageKey();
   const used = await getAiUsageCount(user, date);
   const limit = Number(entitlements.ai_daily_limit || 0);
@@ -4287,6 +4306,16 @@ function stripePricesConfigured(products: any[] = []) {
   return configured;
 }
 
+async function stripeSubscription(subscriptionId: string) {
+  if (!STRIPE_SECRET_KEY || !subscriptionId) throw httpError("Stripe subscription lookup is unavailable.", 503);
+  const response = await fetch(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+    headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` },
+  });
+  const subscription: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw httpError(subscription?.error?.message || "Could not verify subscription state.", 503);
+  return subscription;
+}
+
 async function assertStripePriceMatchesCatalog(priceId: string, expectedCents: number, interval: BillingInterval) {
   if (!STRIPE_SECRET_KEY) throw new Error("Stripe checkout is not configured.");
   const response = await fetch(`https://api.stripe.com/v1/prices/${encodeURIComponent(priceId)}`, {
@@ -4306,7 +4335,7 @@ function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) 
 
 app.get("/billing/plans", async (_req, reply) => { try { const products = await subscriptionProducts(); ok(reply, { success: true, plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products) }); } catch (e) { fail(reply, e, 503); } });
 
-app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = getPlanEntitlements(profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); const products = await subscriptionProducts(); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products), plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = await getUserEntitlements(user, profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); const products = await subscriptionProducts(); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products), plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 app.get("/billing/usage", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const ai_usage = await getAiUsageStatus(user, profile); ok(reply, { success: true, ai_usage, entitlements: ai_usage.entitlements }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
 app.post("/billing/checkout", async (req, reply) => {
@@ -4361,6 +4390,7 @@ app.post("/stripe/webhook", async (req: any, reply) => {
       const customerId = String(obj.customer || "");
       const metadata = obj.parent?.subscription_details?.metadata || obj.subscription_details?.metadata || obj.metadata || {};
       const userId = String(metadata.user_id || "") || await findUserIdByStripeCustomer(customerId);
+      if (!userId) throw httpError("Invoice owner could not be resolved.", 503);
       const products = await subscriptionProducts();
       const productId = products.some((row) => row.product_id === metadata.product_id) ? metadata.product_id : null;
       const occurredAt = new Date(Number(event.created) * 1000).toISOString();
@@ -4373,20 +4403,42 @@ app.post("/stripe/webhook", async (req: any, reply) => {
       if (receipt.error) throw receipt.error;
     }
     if (["customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"].includes(type)) {
-      const customerId = String(obj.customer || "");
-      const userId = String(obj.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId);
-      if (userId) {
-        let plan = normalizePlanKey(obj.metadata?.plan || "");
-        if (!PAID_PLAN_KEYS.includes(plan)) plan = normalizePlanKey(stripePlanFromPrice(String(obj.items?.data?.[0]?.price?.id || "")));
-        const isDeleted = type === "customer.subscription.deleted";
-        const status = isDeleted ? "cancelled" : stripeStatusToAppStatus(obj.status || "none");
-        await updateBillingFields(userId, {
-          plan: isDeleted ? "free" : plan, subscription_status: status,
-          stripe_customer_id: customerId || null, stripe_subscription_id: obj.id || null,
-          subscription_current_period_end: obj.current_period_end ? new Date(Number(obj.current_period_end) * 1000).toISOString() : null,
-          subscription_cancel_at_period_end: !!obj.cancel_at_period_end,
-        });
+      if (!supabase) throw httpError("Subscription entitlements are unavailable.", 503);
+      const currentSubscription = type === "customer.subscription.deleted" ? obj : await stripeSubscription(String(obj.id || ""));
+      const customerId = String(currentSubscription.customer || "");
+      const userId = String(currentSubscription.metadata?.user_id || "") || await findUserIdByStripeCustomer(customerId);
+      if (!userId) throw httpError("Subscription owner could not be resolved.", 503);
+      const priceId = String(currentSubscription.items?.data?.[0]?.price?.id || "");
+      const products = await subscriptionProducts();
+      const product = products.find((row) => row.provider_price_id && row.provider_price_id === priceId);
+      if (!product || !PAID_PLAN_KEYS.includes(product.product_key)) throw httpError("Subscription price is not in the OceanCore catalogue.", 503);
+      const status = type === "customer.subscription.deleted" ? "cancelled" : stripeStatusToAppStatus(currentSubscription.status || "none");
+      const periodEnd = Number(currentSubscription.current_period_end || currentSubscription.items?.data?.[0]?.current_period_end || 0);
+      const eventAt = Number(event.created);
+      if (!Number.isFinite(eventAt) || eventAt <= 0) throw httpError("Invalid subscription event time.", 400);
+      if (["active", "trial"].includes(status) && (!Number.isFinite(periodEnd) || periodEnd * 1000 <= Date.now())) {
+        throw httpError("Active subscription period is unavailable.", 503);
       }
+      const applied = await supabase.rpc("oc_apply_subscription_event", {
+        p_event_id: String(event.id || ""), p_event_type: type,
+        p_event_at: new Date(eventAt * 1000).toISOString(), p_user_id: userId,
+        p_subscription_id: String(currentSubscription.id || ""), p_plan: product.product_key,
+        p_status: status === "trial" ? "trial" : (["active", "past_due", "cancelled"].includes(status) ? status : "expired"),
+        p_valid_until: periodEnd > 0 ? new Date(periodEnd * 1000).toISOString() : null,
+      });
+      if (applied.error) throw applied.error;
+      const current = await supabase.from("oc_entitlements")
+        .select("provider_subscription_id,status,valid_until,metadata")
+        .eq("user_id", userId).eq("provider", "stripe").eq("entitlement_key", "subscription").maybeSingle();
+      if (current.error) throw current.error;
+      if (current.data) await updateBillingFields(userId, {
+        plan: ["active", "trial"].includes(current.data.status) ? current.data.metadata?.plan : "free",
+        subscription_status: current.data.status,
+        stripe_customer_id: customerId || null,
+        stripe_subscription_id: current.data.provider_subscription_id,
+        subscription_current_period_end: current.data.valid_until,
+        subscription_cancel_at_period_end: current.data.provider_subscription_id === obj.id ? !!obj.cancel_at_period_end : false,
+      });
     }
     ok(reply, { received: true });
   } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
@@ -4642,7 +4694,7 @@ async function listSavedAreasForUser(user: AuthUser, limit = 200): Promise<Saved
 
 async function getSavedAreaEntitlements(user: AuthUser) {
   const profile = await getBillingProfile(user);
-  const entitlements = getPlanEntitlements(profile);
+  const entitlements = await getUserEntitlements(user, profile);
   return { profile, entitlements, limit: Number(entitlements.saved_area_limit || 0) };
 }
 
