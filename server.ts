@@ -6537,6 +6537,30 @@ async function communityProfileHandler(req: any, reply: any) {
   } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
 }
 
+async function communityMemberSearchHandler(req: any, reply: any) {
+  try {
+    const viewer = await getRequiredAuthUser(req);
+    const search = str(req.query?.search, "").trim().replace(/[^\p{L}\p{N} .'-]/gu, "").slice(0, 40);
+    if (search.length < 2) {
+      ok(reply, { success: true, members: [] });
+      return;
+    }
+    if (!supabase) throw httpError("Member search is unavailable.", 503);
+    const matches = await supabase.from(PROFILES_TABLE)
+      .select("id,full_name,username,home_port,account_status")
+      .or(`full_name.ilike.%${search}%,username.ilike.%${search}%`)
+      .neq("id", viewer.id)
+      .limit(20);
+    if (matches.error) throw matches.error;
+    const members = (matches.data || [])
+      .filter((row: any) => !row.account_status || row.account_status === "active")
+      .filter((row: any) => String(row.username || row.full_name || "").trim())
+      .slice(0, 12)
+      .map((row: any) => ({ id: row.id, name: row.full_name || row.username, username: row.username || null, home_port: row.home_port || null }));
+    ok(reply, { success: true, members });
+  } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); }
+}
+
 async function communityFollowHandler(req: any, reply: any) {
   try {
     const user = await getCommunityWriteUser(req);
@@ -6917,6 +6941,8 @@ app.delete("/community/posts/:id", deleteCommunityPostHandler);
 app.delete("/api/community/posts/:id", deleteCommunityPostHandler);
 app.get("/community/profile/:id", communityProfileHandler);
 app.get("/api/community/profile/:id", communityProfileHandler);
+app.get("/community/members", communityMemberSearchHandler);
+app.get("/api/community/members", communityMemberSearchHandler);
 app.post("/community/profile/:id/follow", communityFollowHandler);
 app.post("/api/community/profile/:id/follow", communityFollowHandler);
 app.post("/social/profile/:id/follow", communityFollowHandler);
