@@ -23,4 +23,7 @@ test('auth email redirects use the provider query parameter and preserve payload
   await context.callSupabaseAuth('/token?grant_type=password',{email:'fixture@example.test',password:'test-only'});
   assert.equal(requests.at(-1).url.searchParams.get('grant_type'),'password');
   assert.equal(JSON.parse(requests.at(-1).options.body).password,'test-only');
+  await context.callSupabaseAuth('/verify',{token_hash:'fixture-token-hash',type:'recovery'});
+  assert.equal(requests.at(-1).url.pathname,'/auth/v1/verify');
+  assert.deepEqual(JSON.parse(requests.at(-1).options.body),{token_hash:'fixture-token-hash',type:'recovery'});
 });

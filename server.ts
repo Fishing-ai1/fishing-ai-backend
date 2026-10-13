@@ -3120,6 +3120,23 @@ app.post("/auth/reset-password", async (req, reply) => {
   }
 });
 
+app.post("/auth/verify-recovery", async (req, reply) => {
+  try {
+    const body = (req.body || {}) as any;
+    const tokenHash = str(body.token_hash);
+    if (!/^[a-zA-Z0-9_-]{16,256}$/.test(tokenHash)) {
+      reply.code(400).send({ success: false, error: "Invalid recovery link. Request a new password reset email." });
+      return;
+    }
+
+    const data = await callSupabaseAuth("/verify", { token_hash: tokenHash, type: "recovery" });
+    if (!data?.access_token) throw new Error("Recovery link could not be verified. Request a new password reset email.");
+    ok(reply, { success: true, session: formatSessionPayload(data), user: data.user ?? null });
+  } catch (e) {
+    fail(reply, e, 400);
+  }
+});
+
 app.post("/auth/magic-link", async (req, reply) => {
   try {
     const body = (req.body || {}) as any;
