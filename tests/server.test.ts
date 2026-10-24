@@ -17,6 +17,9 @@ test('existing backend boots and private mutation / AI routes fail closed',async
   const recovery=await app.inject({method:'POST',url:'/auth/verify-recovery',payload:{token_hash:'short'}});
   assert.equal(recovery.statusCode,400);
   assert.match(recovery.json().error,/Invalid recovery link/);
+  const feed=await app.inject({method:'GET',url:'/api/social/feed?feed=home&limit=12'});
+  assert.equal(feed.statusCode,200);
+  assert.equal(feed.json().candidate_window,500);
   const platform=await app.inject({method:'GET',url:'/api/platform/status'});assert.equal(platform.statusCode,200);assert.equal(platform.json().connected,false);
   const admin=await app.inject({method:'GET',url:'/admin/control/me'});assert.equal(admin.statusCode,503);
   const frontend=await app.inject({method:'GET',url:'/app/control-centre.html'});assert.equal(frontend.statusCode,200);assert.match(frontend.body,/CONTROL CENTRE/);

@@ -33,11 +33,13 @@ import { flagContent } from './src/platform/moderation.ts';
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { featureFlagsFromEnv } from "./src/feature-flags.ts";
 import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
+import { MessageRateLimiter, messageNeedsReview } from "./src/social/MessageSafety.ts";
 import { verifyStripeSignature } from "./src/monetization/stripe-signature.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-09-26_LAUNCH_RELIABILITY";
+const BUILD_ID = "OC_BACKEND_2026-10-24_SOCIAL_SAFETY_PHASE1";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
 const feedRankingService = new FeedRankingService();
+const messageRateLimiter = new MessageRateLimiter();
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -5518,7 +5520,8 @@ async function currentCommunityAuthors<T extends { user_id: string; author_name?
   });
 }
 
-async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{ posts: CommunityPostRow[]; storage: string }> {
+async function listCommunityPostsForUser(user: AuthUser, filter = "", maxRows = 100): Promise<{ posts: CommunityPostRow[]; storage: string }> {
+  const candidateLimit = clamp(maxRows, 1, 500);
   const followingIds = filter === "following" ? await communityFollowingIds(user.id) : new Set<string>();
   const sortPosts = (posts: CommunityPostRow[]) => posts.sort((a, b) => filter === "trending"
     ? (Number(b.likes_count || 0) * 3 + Number(b.comments_count || 0) * 5) - (Number(a.likes_count || 0) * 3 + Number(a.comments_count || 0) * 5)
@@ -5529,7 +5532,7 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
         .from(COMMUNITY_POSTS_TABLE)
         .select(COMMUNITY_POST_SELECT)
         .order("created_at", { ascending: false })
-        .limit(100);
+        .limit(candidateLimit);
       if (res.error) throw res.error;
       return {
         posts: await currentCommunityAuthors(sortPosts((res.data || [])
@@ -5557,7 +5560,7 @@ async function listCommunityPostsForUser(user: AuthUser, filter = ""): Promise<{
       .filter((post) => communityPostMatchesFilter(post, filter, followingIds))
       .sort((a, b) => filter === "trending"
         ? (Number(b.likes_count || 0) * 3 + Number(b.comments_count || 0) * 5) - (Number(a.likes_count || 0) * 3 + Number(a.comments_count || 0) * 5)
-        : String(b.created_at).localeCompare(String(a.created_at)))),
+        : String(b.created_at).localeCompare(String(a.created_at))).slice(0, candidateLimit)),
     storage: "local",
   };
 }
@@ -5639,22 +5642,28 @@ async function socialFeedHandler(req: any, reply: any) {
     const location = str(req.query?.location, "");
     const limit = clamp(Number(req.query?.limit || 30), 1, 50);
     const rawCursor = Number(req.query?.cursor || 0);
-    const offset = Number.isFinite(rawCursor) ? clamp(Math.floor(rawCursor), 0, 10_000) : 0;
+    const offset = Number.isFinite(rawCursor) ? clamp(Math.floor(rawCursor), 0, 500) : 0;
     const baseFilter =
       feed === "following" || feed === "trending" || feed === "videos" || feed === "boats"
         ? feed
         : "";
-    const result = await listCommunityPostsForUser(user, baseFilter);
-    const followedAuthorIds = await communityFollowingIds(user.id);
+    const [result, followedAuthorIds, profileResult] = await Promise.all([
+      listCommunityPostsForUser(user, baseFilter, 500),
+      communityFollowingIds(user.id),
+      supabase && !user.isGuest
+        ? supabase.from(PROFILES_TABLE).select("favourite_species,home_port").eq("id", user.id).maybeSingle()
+        : Promise.resolve(null),
+    ]);
+    const profileInterests = profileResult?.data;
     const preferredSpecies = new Set(
-      [species]
+      [species, ...String(profileInterests?.favourite_species || "").split(/[,;]/)]
         .filter(Boolean)
-        .map((value) => value.toLowerCase()),
+        .map((value) => value.trim().toLowerCase()),
     );
     const preferredLocations = new Set(
-      [location]
+      [location, String(profileInterests?.home_port || "")]
         .filter(Boolean)
-        .map((value) => value.toLowerCase()),
+        .map((value) => value.trim().toLowerCase()),
     );
 
     const posts = result.posts
@@ -5677,22 +5686,25 @@ async function socialFeedHandler(req: any, reply: any) {
         taggedSpecies: post.species ? [String(post.species).toLowerCase()] : [],
         metadata: { post },
       } satisfies FeedCandidate;
-      return { post, score: feedRankingService.score(candidate, { followedAuthorIds, preferredSpecies, preferredLocations }) };
+      return { post, authorId: post.user_id, score: feedRankingService.score(candidate, { followedAuthorIds, preferredSpecies, preferredLocations }) };
     });
 
     const ordered = candidates.sort((a, b) => feed === "latest"
       ? String(b.post.created_at || "").localeCompare(String(a.post.created_at || ""))
       : b.score - a.score);
-    const page = ordered.slice(offset, offset + limit);
+    const diversified = feed === "latest" ? ordered : feedRankingService.diversify(ordered);
+    const page = diversified.slice(offset, offset + limit);
     const ranked = page.map(({ post, score }) => communityPostToFeedItem(req, post, score));
-    const nextCursor = offset + page.length < ordered.length ? String(offset + page.length) : null;
+    const nextCursor = offset + page.length < diversified.length ? String(offset + page.length) : null;
 
     ok(reply, {
       success: true,
       feed,
       items: ranked,
       count: ranked.length,
-      available_count: ordered.length,
+      available_count: diversified.length,
+      candidate_window: 500,
+      candidate_window_capped: result.posts.length === 500,
       has_more: nextCursor !== null,
       next_cursor: nextCursor,
       storage: result.storage,
@@ -6839,7 +6851,12 @@ async function communitySendMessageHandler(req: any, reply: any) {
     const otherId = members.find((member: any) => member.conversation_id === id && member.user_id !== user.id)?.user_id;
     if (!conversation || !otherId) throw uploadError("Conversation not found.", 404);
     if (!await areCommunityFriends(user.id, otherId) || await communityUsersBlocked(user.id, otherId)) throw uploadError("This message cannot be sent.", 403);
-    const status: CommunityMessageRow["status"] = /https?:\/\/|\b(crypto|gift card|wire transfer|password)\b/i.test(body) ? "held" : "active";
+    const retryAfter = messageRateLimiter.reserve(user.id);
+    if (retryAfter) {
+      reply.header("Retry-After", String(retryAfter));
+      throw uploadError("Too many messages. Try again shortly.", 429);
+    }
+    const status: CommunityMessageRow["status"] = messageNeedsReview(body) ? "held" : "active";
     const now = new Date().toISOString();
     const row: CommunityMessageRow = { id: crypto.randomUUID(), conversation_id: id, sender_id: user.id, body, status, moderation_reason: status === "held" ? "automated safety review" : null, created_at: now, updated_at: now };
     if (supabase) {
