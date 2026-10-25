@@ -9,15 +9,17 @@ export async function flagContent(db: any, gateway: any, input: { userId: string
   const flags=riskSignals(input.text);
   try {
     const result=await gateway.moderate(input.text);
+    if(!result.connected)flags.push({reason:'Moderation provider unavailable; manual review required',confidence:0,severity:'low'});
     if(result.flagged) {
       const categories=Object.keys(result.categories).filter(k=>result.categories[k]);
       const confidence=Math.max(0,...categories.map(k=>Number(result.scores[k] || 0)));
       flags.push({reason:'Content moderation: '+categories.join(', '),confidence,severity:confidence>0.95?'high':'medium'});
     }
   } catch { flags.push({reason:'Moderation provider unavailable; manual review required',confidence:0,severity:'low'}); }
-  if(!flags.length)return;
+  if(!flags.length)return flags;
   const rows=flags.map(f=>({user_id:input.userId,target_type:input.targetType,target_id:input.targetId,...f,detector:'oceancore-rules-v1 / '+gateway.config.moderation}));
   const result=await db.from('oc_moderation').insert(rows);
   if(result.error)throw Object.assign(new Error('Moderation review could not be recorded. Please retry.'),{statusCode:503});
   // Classification creates review work; it never changes account status or bans a user.
+  return flags;
 }

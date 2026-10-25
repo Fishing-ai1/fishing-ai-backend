@@ -37,7 +37,7 @@ import { decodeFeedCursor, encodeFeedCursor, type FeedCursor } from "./src/socia
 import { MessageRateLimiter, messageNeedsReview } from "./src/social/MessageSafety.ts";
 import { verifyStripeSignature } from "./src/monetization/stripe-signature.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-10-25_SCALABLE_SOCIAL_FEED";
+const BUILD_ID = "OC_BACKEND_2026-10-25_FEED_AND_PUBLISH_SAFETY";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
 const feedRankingService = new FeedRankingService();
 const messageRateLimiter = new MessageRateLimiter();
@@ -5900,14 +5900,18 @@ async function createCommunityPostHandler(req: any, reply: any) {
       updated_at: now,
     });
 
-    if (PLATFORM_ENABLED && supabase) await flagContent(supabase,aiGateway,{userId:user.id,targetType:'post',targetId:row.id,text:title+' '+caption});
-    const saved = await saveCommunityPost({...row,...regional});
-    const rewards = await awardRewardBatch(user, rewardEventsForCommunityPost(saved.post));
+    const flags = PLATFORM_ENABLED && supabase
+      ? await flagContent(supabase,aiGateway,{userId:user.id,targetType:'post',targetId:row.id,text:title+' '+caption})
+      : [];
+    const heldForReview = flags.length > 0;
+    const saved = await saveCommunityPost({...row,...regional,status:heldForReview ? "hidden" : "active"});
+    const rewards = heldForReview ? [] : await awardRewardBatch(user, rewardEventsForCommunityPost(saved.post));
     ok(reply, {
       success: true,
       post: withPublicCommunityMedia(req, saved.post),
       storage: saved.storage,
       rewards,
+      held_for_review: heldForReview,
     });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
@@ -6125,7 +6129,7 @@ async function createCommunityCommentHandler(req: any, reply: any) {
     const body = str((req.body as any)?.body, "").slice(0, 1000);
     if (body.length < 2) throw new Error("Write a comment first.");
     const now = new Date().toISOString();
-    const commentStatus = communityCommentStatusFor(post, body);
+    let commentStatus = communityCommentStatusFor(post, body);
     const row = normalizeCommunityComment({
       id: crypto.randomUUID(),
       post_id: postId,
@@ -6140,7 +6144,11 @@ async function createCommunityCommentHandler(req: any, reply: any) {
 
     if (supabase) {
       try {
-        if (PLATFORM_ENABLED) await flagContent(supabase,aiGateway,{userId:user.id,targetType:'comment',targetId:row.id,text:body});
+        if (PLATFORM_ENABLED) {
+          const flags = await flagContent(supabase,aiGateway,{userId:user.id,targetType:'comment',targetId:row.id,text:body});
+          if (flags.length) commentStatus = "held";
+        }
+        row.status = commentStatus;
         const saved = await supabase.from("community_comments").insert(row).select(COMMUNITY_COMMENT_SELECT).single();
         if (saved.error) throw saved.error;
         const countRes = await supabase.from("community_comments").select("id", { count: "exact", head: true }).eq("post_id", postId).eq("status", "active");
@@ -6163,6 +6171,7 @@ async function createCommunityCommentHandler(req: any, reply: any) {
         return;
       } catch (e) {
         console.warn("community comment supabase insert failed, using local storage", e);
+        if (IS_PRODUCTION) throw e;
       }
     }
 
@@ -6261,14 +6270,26 @@ async function deleteCommunityPostHandler(req: any, reply: any) {
 async function adminCommunityPostsHandler(req: any, reply: any) {
   try {
     const admin = await requireAdminUser(req);
-    const result = await listCommunityPostsForUser(admin, "");
+    const [result, hiddenPosts] = await Promise.all([
+      listCommunityPostsForUser(admin, ""),
+      listHiddenCommunityPosts(),
+    ]);
     const reports = supabase
       ? await supabase.from("community_reports").select(COMMUNITY_REPORT_SELECT).order("created_at", { ascending: false }).limit(200).then((r) => r.data || []).catch(() => [])
       : await readLocalCommunityReports();
-    ok(reply, { success: true, admin: { id: admin.id, email: admin.email }, posts: result.posts.map((post) => withPublicCommunityMedia(req, post)), reports, storage: result.storage });
+    const posts = [...result.posts, ...hiddenPosts.filter(post => !result.posts.some(row => row.id === post.id))];
+    ok(reply, { success: true, admin: { id: admin.id, email: admin.email }, posts: posts.map((post) => withPublicCommunityMedia(req, post)), reports, storage: result.storage });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
+}
+
+async function listHiddenCommunityPosts(limit = 150): Promise<CommunityPostRow[]> {
+  if (!supabase) return (await readLocalCommunityPosts()).filter(post => post.status === "hidden").slice(0, limit);
+  const result = await supabase.from(COMMUNITY_POSTS_TABLE).select(COMMUNITY_POST_SELECT)
+    .eq("status", "hidden").order("created_at", { ascending: false }).limit(limit);
+  if (result.error) throw result.error;
+  return (result.data || []).map(normalizeCommunityPost);
 }
 
 async function adminUpdateCommunityPostHandler(req: any, reply: any) {
@@ -6364,7 +6385,7 @@ async function adminSupportCenterHandler(req: any, reply: any) {
   try {
     const admin = await requireAdminUser(req);
     const data = await getAdminData(1000);
-    const [feedback, audit, community, comments, reports, follows, heldMessages, messageReports] = await Promise.all([
+    const [feedback, audit, community, comments, reports, follows, heldMessages, messageReports, hiddenPosts] = await Promise.all([
       listFeedbackRows(300),
       listAuditRows(150),
       listCommunityPostsForUser(admin, "").catch(() => ({ posts: [] as CommunityPostRow[], storage: "unavailable" })),
@@ -6379,11 +6400,12 @@ async function adminSupportCenterHandler(req: any, reply: any) {
       supabase
         ? supabase.from("community_message_reports").select("id,message_id,reporter_id,reason,notes,status,created_at,updated_at").order("created_at", { ascending: false }).limit(300).then((r) => r.error ? [] : r.data || []).catch(() => [])
         : readLocalCommunityMessageReports(),
+      listHiddenCommunityPosts().catch(() => []),
     ]);
 
     const profilesById = new Map((data.profiles || []).map((profile: any) => [String(profile.id), profile]));
     const usersById = new Map((data.users || []).map((user: any) => [String(user.id), user]));
-    const posts = community.posts || [];
+    const posts = [...(community.posts || []), ...hiddenPosts];
     const postsById = new Map(posts.map((post) => [String(post.id), post]));
     const openFeedback = feedback.filter((row: any) => String(row.status || "open") !== "closed");
     const reportedPostIds = new Set(reports.filter((row: any) => String(row.status || "open") !== "closed").map((row: any) => String(row.post_id)));
@@ -6461,6 +6483,17 @@ async function adminSupportCenterHandler(req: any, reply: any) {
       .slice(0, 50);
 
     const moderationQueue = [
+      ...hiddenPosts.map((post) => ({
+        queue_type: "held_post",
+        id: post.id,
+        post_id: post.id,
+        status: post.status,
+        reason: "automated_safety_review",
+        user_id: post.user_id,
+        post_title: post.title || post.species || "Community post",
+        caption: post.caption || "",
+        created_at: post.created_at,
+      })),
       ...reports.map((report: any) => {
         const post = postsById.get(String(report.post_id));
         return {
