@@ -33,10 +33,11 @@ import { flagContent } from './src/platform/moderation.ts';
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { featureFlagsFromEnv } from "./src/feature-flags.ts";
 import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRankingService.ts";
+import { decodeFeedCursor, encodeFeedCursor, type FeedCursor } from "./src/social/FeedCursor.ts";
 import { MessageRateLimiter, messageNeedsReview } from "./src/social/MessageSafety.ts";
 import { verifyStripeSignature } from "./src/monetization/stripe-signature.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-10-25_DURABLE_MESSAGE_SAFETY";
+const BUILD_ID = "OC_BACKEND_2026-10-25_SCALABLE_SOCIAL_FEED";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
 const feedRankingService = new FeedRankingService();
 const messageRateLimiter = new MessageRateLimiter();
@@ -5633,81 +5634,159 @@ function communityPostToFeedItem(req: any, post: CommunityPostRow, score: number
   };
 }
 
+const SOCIAL_FEED_WINDOW = 48;
+
+async function socialFeedCandidates(
+  user: AuthUser,
+  feed: string,
+  category: string,
+  species: string,
+  location: string,
+  cursor: FeedCursor | null,
+  pendingIds: string[] | null,
+) {
+  if (supabase) {
+    const result = await supabase.rpc("oc_social_feed_candidates", {
+      p_viewer: user.isGuest ? null : user.id,
+      p_feed: feed,
+      p_category: category,
+      p_species: species,
+      p_location: location,
+      p_before_at: pendingIds ? null : cursor?.beforeAt || null,
+      p_before_id: pendingIds ? null : cursor?.beforeId || null,
+      p_ids: pendingIds,
+      p_page_size: pendingIds ? pendingIds.length : SOCIAL_FEED_WINDOW + 1,
+    });
+    if (result.error) throw uploadError("The social feed is temporarily unavailable.", 503);
+    return (result.data || []).map(normalizeCommunityPost) as CommunityPostRow[];
+  }
+
+  const followed = feed === "following" ? await communityFollowingIds(user.id) : new Set<string>();
+  const lower = (value: unknown) => String(value || "").toLowerCase();
+  return (await readLocalCommunityPosts())
+    .filter(post => post.status === "active" && post.privacy !== "private")
+    .filter(post => !category || lower(post.category) === category)
+    .filter(post => !species || lower(post.species).includes(species))
+    .filter(post => !location || lower(post.general_area).includes(location))
+    .filter(post => feed !== "following" || followed.has(post.user_id))
+    .filter(post => feed !== "videos" || post.post_type === "video" || post.media_type === "video")
+    .filter(post => feed !== "boats" || post.category === "boats")
+    .filter(post => feed !== "local" || ["fishing_report", "catch", "trip_report"].includes(post.post_type))
+    .filter(post => feed !== "catches" || post.post_type === "catch")
+    .filter(post => pendingIds ? pendingIds.includes(post.id) : !cursor ||
+      String(post.created_at).localeCompare(cursor.beforeAt) < 0 ||
+      (String(post.created_at) === cursor.beforeAt && post.id < cursor.beforeId))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || b.id.localeCompare(a.id))
+    .slice(0, pendingIds ? pendingIds.length : SOCIAL_FEED_WINDOW + 1);
+}
+
 async function socialFeedHandler(req: any, reply: any) {
   try {
     const user = await getAuthUser(req);
-    const feed = str(req.query?.feed, "home").toLowerCase();
-    const category = str(req.query?.category, "").toLowerCase();
-    const species = str(req.query?.species, "");
-    const location = str(req.query?.location, "");
-    const limit = clamp(Number(req.query?.limit || 30), 1, 50);
-    const rawCursor = Number(req.query?.cursor || 0);
-    const offset = Number.isFinite(rawCursor) ? clamp(Math.floor(rawCursor), 0, 500) : 0;
-    const baseFilter =
-      feed === "following" || feed === "trending" || feed === "videos" || feed === "boats"
-        ? feed
-        : "";
-    const [result, followedAuthorIds, profileResult] = await Promise.all([
-      listCommunityPostsForUser(user, baseFilter, 500),
-      communityFollowingIds(user.id),
-      supabase && !user.isGuest
-        ? supabase.from(PROFILES_TABLE).select("favourite_species,home_port").eq("id", user.id).maybeSingle()
-        : Promise.resolve(null),
-    ]);
-    const profileInterests = profileResult?.data;
-    const preferredSpecies = new Set(
-      [species, ...String(profileInterests?.favourite_species || "").split(/[,;]/)]
-        .filter(Boolean)
-        .map((value) => value.trim().toLowerCase()),
-    );
-    const preferredLocations = new Set(
-      [location, String(profileInterests?.home_port || "")]
-        .filter(Boolean)
-        .map((value) => value.trim().toLowerCase()),
-    );
+    const requestedFeed = str(req.query?.feed, "home").toLowerCase();
+    const feed = ["home", "following", "trending", "videos", "boats", "local", "catches", "latest"].includes(requestedFeed)
+      ? requestedFeed : "home";
+    const category = str(req.query?.category, "").toLowerCase().slice(0, 50);
+    const species = str(req.query?.species, "").toLowerCase().slice(0, 100);
+    const location = str(req.query?.location, "").toLowerCase().slice(0, 100);
+    const requestedLimit = Number(req.query?.limit || 30);
+    const limit = Number.isFinite(requestedLimit) ? clamp(Math.floor(requestedLimit), 1, 50) : 30;
+    const scope = crypto.createHash("sha256")
+      .update(JSON.stringify([user.id, feed, category, species, location]))
+      .digest("hex").slice(0, 24);
+    const rawCursor = str(req.query?.cursor, "");
+    let cursor: FeedCursor | null = null;
+    try {
+      if (rawCursor) cursor = decodeFeedCursor(rawCursor, scope);
+    } catch {
+      throw uploadError("Invalid feed cursor. Refresh the feed and try again.", 400);
+    }
 
-    const posts = result.posts
-      .filter((post) => !category || String(post.category || "").toLowerCase() === category)
-      .filter((post) => !species || String(post.species || "").toLowerCase().includes(species.toLowerCase()))
-      .filter((post) => !location || String(post.general_area || "").toLowerCase().includes(location.toLowerCase()))
-      .filter((post) => feed !== "local" || ["fishing_report", "catch", "trip_report"].includes(String(post.post_type || "")))
-      .filter((post) => feed !== "catches" || String(post.post_type || "") === "catch");
+    let rankedPage: { post: CommunityPostRow; score: number }[] = [];
+    let nextCursor: string | null = null;
+    if (cursor?.pending.length) {
+      const pending = await socialFeedCandidates(user, feed, category, species, location, cursor, cursor.pending.map(item => item.id));
+      const byId = new Map(pending.map(post => [post.id, post]));
+      const ordered = cursor.pending.map(item => ({ post: byId.get(item.id), score: item.score }))
+        .filter(item => !!item.post) as { post: CommunityPostRow; score: number }[];
+      rankedPage = ordered.slice(0, limit);
+      const remaining = ordered.slice(limit).map(item => ({ id: item.post.id, score: item.score }));
+      if (remaining.length || cursor.more) nextCursor = encodeFeedCursor({ ...cursor, pending: remaining });
+    }
 
-    const candidates = posts.map((post) => {
-      const candidate = {
-        id: post.id,
-        authorId: post.user_id,
-        contentType: post.post_type,
-        createdAt: post.created_at,
-        likesCount: post.likes_count,
-        commentsCount: post.comments_count,
-        viewsCount: post.views_count,
-        generalLocation: String(post.general_area || "").toLowerCase(),
-        taggedSpecies: post.species ? [String(post.species).toLowerCase()] : [],
-        metadata: { post },
-      } satisfies FeedCandidate;
-      return { post, authorId: post.user_id, score: feedRankingService.score(candidate, { followedAuthorIds, preferredSpecies, preferredLocations }) };
-    });
+    if (!rankedPage.length && (!cursor || cursor.more)) {
+      const rows = await socialFeedCandidates(user, feed, category, species, location, cursor, null);
+      const batch = rows.slice(0, SOCIAL_FEED_WINDOW);
+      const hasOlder = rows.length > SOCIAL_FEED_WINDOW;
+      const [profileResult, followedAuthorIds] = await Promise.all([
+        supabase && !user.isGuest
+          ? supabase.from(PROFILES_TABLE).select("favourite_species,home_port").eq("id", user.id).maybeSingle()
+          : Promise.resolve(null),
+        supabase && !user.isGuest && batch.length
+          ? supabase.from("community_follows").select("following_id").eq("follower_id", user.id)
+              .in("following_id", [...new Set(batch.map(post => post.user_id))]).then(result => {
+                if (result.error) throw result.error;
+                return new Set((result.data || []).map((row: any) => String(row.following_id)));
+              })
+          : supabase ? Promise.resolve(new Set<string>()) : communityFollowingIds(user.id),
+      ]);
+      const profileInterests = profileResult?.data;
+      const preferredSpecies = new Set(
+        [species, ...String(profileInterests?.favourite_species || "").split(/[,;]/)]
+          .filter(Boolean)
+          .map((value) => value.trim().toLowerCase()),
+      );
+      const preferredLocations = new Set(
+        [location, String(profileInterests?.home_port || "")]
+          .filter(Boolean)
+          .map((value) => value.trim().toLowerCase()),
+      );
+      const candidates = batch.map((post) => {
+        const candidate = {
+          id: post.id,
+          authorId: post.user_id,
+          contentType: post.post_type,
+          createdAt: post.created_at,
+          likesCount: post.likes_count,
+          commentsCount: post.comments_count,
+          viewsCount: post.views_count,
+          generalLocation: String(post.general_area || "").toLowerCase(),
+          taggedSpecies: post.species ? [String(post.species).toLowerCase()] : [],
+          metadata: { post },
+        } satisfies FeedCandidate;
+        return { post, authorId: post.user_id, score: feedRankingService.score(candidate, { followedAuthorIds, preferredSpecies, preferredLocations }) };
+      });
 
-    const ordered = candidates.sort((a, b) => feed === "latest"
-      ? String(b.post.created_at || "").localeCompare(String(a.post.created_at || ""))
-      : b.score - a.score);
-    const diversified = feed === "latest" ? ordered : feedRankingService.diversify(ordered);
-    const page = diversified.slice(offset, offset + limit);
-    const ranked = page.map(({ post, score }) => communityPostToFeedItem(req, post, score));
-    const nextCursor = offset + page.length < diversified.length ? String(offset + page.length) : null;
+      const ordered = candidates.sort((a, b) => feed === "latest"
+        ? String(b.post.created_at).localeCompare(String(a.post.created_at)) || b.post.id.localeCompare(a.post.id)
+        : b.score - a.score || String(b.post.created_at).localeCompare(String(a.post.created_at)) || b.post.id.localeCompare(a.post.id));
+      const diversified = feed === "latest" ? ordered : feedRankingService.diversify(ordered);
+      rankedPage = diversified.slice(0, limit);
+      if (batch.length && (diversified.length > limit || hasOlder)) {
+        const oldest = batch[batch.length - 1];
+        nextCursor = encodeFeedCursor({
+          scope,
+          beforeAt: oldest.created_at,
+          beforeId: oldest.id,
+          pending: diversified.slice(limit).map(item => ({ id: item.post.id, score: item.score })),
+          more: hasOlder,
+        });
+      }
+    }
+    const ranked = await currentCommunityAuthors(rankedPage.map(item => item.post));
+    const items = ranked.map((post, index) => communityPostToFeedItem(req, post, rankedPage[index].score));
 
     ok(reply, {
       success: true,
       feed,
-      items: ranked,
-      count: ranked.length,
-      available_count: diversified.length,
-      candidate_window: 500,
-      candidate_window_capped: result.posts.length === 500,
+      items,
+      count: items.length,
+      available_count: null,
+      candidate_window: SOCIAL_FEED_WINDOW,
+      candidate_window_capped: false,
       has_more: nextCursor !== null,
       next_cursor: nextCursor,
-      storage: result.storage,
+      storage: supabase ? "supabase" : "local",
       ranking: {
         service: "FeedRankingService",
         factors: ["freshness", "engagement", "followed creators", "species interests", "location relevance"],
