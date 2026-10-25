@@ -36,7 +36,7 @@ import { FeedRankingService, type FeedCandidate } from "./src/social/FeedRanking
 import { MessageRateLimiter, messageNeedsReview } from "./src/social/MessageSafety.ts";
 import { verifyStripeSignature } from "./src/monetization/stripe-signature.ts";
 
-const BUILD_ID = "OC_BACKEND_2026-10-24_SOCIAL_SAFETY_PHASE1";
+const BUILD_ID = "OC_BACKEND_2026-10-25_DURABLE_MESSAGE_SAFETY";
 const SOCIAL_FEATURE_FLAGS = featureFlagsFromEnv();
 const feedRankingService = new FeedRankingService();
 const messageRateLimiter = new MessageRateLimiter();
@@ -6851,7 +6851,13 @@ async function communitySendMessageHandler(req: any, reply: any) {
     const otherId = members.find((member: any) => member.conversation_id === id && member.user_id !== user.id)?.user_id;
     if (!conversation || !otherId) throw uploadError("Conversation not found.", 404);
     if (!await areCommunityFriends(user.id, otherId) || await communityUsersBlocked(user.id, otherId)) throw uploadError("This message cannot be sent.", 403);
-    const retryAfter = messageRateLimiter.reserve(user.id);
+    const retryAfter = supabase
+      ? await supabase.rpc("oc_reserve_message_send", { p_user: user.id }).then(result => {
+          if (result.error) throw result.error;
+          if (!Number.isInteger(result.data) || result.data < 0) throw new Error("Invalid message rate-limit response.");
+          return result.data as number;
+        })
+      : messageRateLimiter.reserve(user.id);
     if (retryAfter) {
       reply.header("Retry-After", String(retryAfter));
       throw uploadError("Too many messages. Try again shortly.", 429);
