@@ -575,6 +575,18 @@ async function callSupabaseAuth(path: string, payload: Record<string, any>) {
 
 function formatSessionPayload(data: any = {}) {
   if (!data?.access_token) return null;
+  // The token is already issued by Auth. Inspect outbound claims only; never rewrite signed bytes.
+  try {
+    const parts = data.access_token.split(".");
+    if (parts.length !== 3 || !parts.every((part: string) => /^[A-Za-z0-9_-]+$/.test(part))) throw new Error();
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"), (key, value) => {
+      if (key === "admin_notes" && value != null && value !== "") throw new Error();
+      return value;
+    });
+    if (!claims || typeof claims !== "object" || Array.isArray(claims)) throw new Error();
+  } catch {
+    throw httpError("Session temporarily unavailable.", 503);
+  }
   const expiresIn = data.expires_in ?? null;
   const expiresAt = data.expires_at ?? (expiresIn ? Math.floor(Date.now() / 1000) + Number(expiresIn) : null);
   return {
@@ -583,8 +595,18 @@ function formatSessionPayload(data: any = {}) {
     expires_in: expiresIn,
     expires_at: expiresAt,
     token_type: data.token_type ?? "bearer",
-    user: data.user ?? null,
+    user: memberAuthUser(data.user),
   };
+}
+
+function memberAuthUser(user: any) {
+  if (user == null) return null;
+  // Provider users are JSON and may repeat metadata inside identities.
+  return JSON.parse(JSON.stringify(user, (key, value) => key === "admin_notes" ? undefined : value));
+}
+
+function memberProfile({ admin_notes, ...fields }: ProfileRow) {
+  return fields;
 }
 
 function pickMetaString(meta: any, keys: string[]) {
@@ -623,6 +645,7 @@ function profileFromMetadata(user: AuthUser): ProfileRow {
   });
 }
 
+// Auth metadata is member-visible. Omit the note from merge updates to preserve existing evidence.
 function metadataFromProfile(profile: ProfileRow) {
   return {
     full_name: profile.full_name ?? null,
@@ -640,7 +663,6 @@ function metadataFromProfile(profile: ProfileRow) {
     plan: profile.plan ?? "free",
     subscription_status: profile.subscription_status ?? "none",
     account_status: profile.account_status ?? "active",
-    admin_notes: profile.admin_notes ?? null,
     suspended_at: profile.suspended_at ?? null,
   };
 }
@@ -1143,7 +1165,7 @@ async function getProfileForUser(user: AuthUser): Promise<ProfileRow> {
     .from(PROFILES_TABLE)
     .upsert(
       {
-        ...metaProfile,
+        ...memberProfile(metaProfile),
         id: user.id,
         email: user.email,
         legal_version: metaProfile.legal_version || LEGAL_VERSION,
@@ -1176,6 +1198,7 @@ async function saveProfileForUser(user: AuthUser, patch: Partial<ProfileRow>) {
     const merged = normalizeProfile({
       ...current,
       ...patch,
+      admin_notes: current.admin_notes,
       id: user.id,
       email: patch.email ?? current.email ?? user.email ?? null,
       legal_version: patch.legal_version ?? current.legal_version ?? LEGAL_VERSION,
@@ -1209,7 +1232,7 @@ async function saveProfileForUser(user: AuthUser, patch: Partial<ProfileRow>) {
 
   const saved = await supabase
     .from(PROFILES_TABLE)
-    .upsert(payload, { onConflict: "id" })
+    .upsert(memberProfile(payload), { onConflict: "id" })
     .select(
       "id,email,full_name,username,boat_name,home_port,favourite_species,role_plan,avatar_url,accepted_terms_at,accepted_privacy_at,accepted_disclaimer_at,legal_version,app_role,plan,subscription_status,account_status,admin_notes,suspended_at,stripe_customer_id,stripe_subscription_id,subscription_current_period_end,subscription_cancel_at_period_end,ads_enabled,ai_daily_limit,saved_area_limit,catch_card_level,created_at,updated_at"
     )
@@ -3035,7 +3058,7 @@ app.post("/auth/login", async (req, reply) => {
       success: true,
       message: "Signed in.",
       session: formatSessionPayload(data),
-      user: data.user ?? null,
+      user: memberAuthUser(data.user),
     });
   } catch (e) {
     fail(reply, e, 401);
@@ -3057,7 +3080,7 @@ app.post("/auth/refresh", async (req, reply) => {
       success: true,
       message: "Session refreshed.",
       session: formatSessionPayload(data),
-      user: data.user ?? null,
+      user: memberAuthUser(data.user),
     });
   } catch (e) {
     fail(reply, e, 401);
@@ -3082,7 +3105,7 @@ app.post("/auth/signup", async (req, reply) => {
         ? "Account created and signed in."
         : "Account created. Check your email to confirm it before signing in.",
       session: formatSessionPayload(data),
-      user: data.user ?? null,
+      user: memberAuthUser(data.user),
       email_confirmation_required: !data?.access_token,
     });
   } catch (e) {
@@ -3134,7 +3157,7 @@ app.post("/auth/verify-recovery", async (req, reply) => {
 
     const data = await callSupabaseAuth("/verify", { token_hash: tokenHash, type: "recovery" });
     if (!data?.access_token) throw new Error("Recovery link could not be verified. Request a new password reset email.");
-    ok(reply, { success: true, session: formatSessionPayload(data), user: data.user ?? null });
+    ok(reply, { success: true, session: formatSessionPayload(data), user: memberAuthUser(data.user) });
   } catch (e) {
     fail(reply, e, 400);
   }
@@ -3185,7 +3208,7 @@ app.post("/auth/update-password", async (req, reply) => {
     ok(reply, {
       success: true,
       message: "Password updated. You can now sign in normally.",
-      user: data?.user ?? null,
+      user: memberAuthUser(data?.user),
     });
   } catch (e) {
     fail(reply, e, 400);
@@ -3210,7 +3233,7 @@ app.post("/auth/avatar", async (req, reply) => {
       email: user.email,
       avatar_url: avatarUrl,
     });
-    ok(reply, { success: true, avatar_url: makeAbsoluteMediaUrl(req, avatarUrl), profile });
+    ok(reply, { success: true, avatar_url: makeAbsoluteMediaUrl(req, avatarUrl), profile: memberProfile(profile) });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
@@ -3225,7 +3248,7 @@ app.patch("/auth/email", async (req, reply) => {
     await supabase.auth.admin.updateUserById(user.id, { email } as any);
     const current = await getProfileForUser(user).catch(() => null);
     const profile = await saveProfileForUser({ ...user, email }, { ...(current || {}), id: user.id, email });
-    ok(reply, { success: true, message: "Email update started. You may need to confirm it by email.", profile });
+    ok(reply, { success: true, message: "Email update started. You may need to confirm it by email.", profile: memberProfile(profile) });
   } catch (e) {
     fail(reply, e, (e as any)?.statusCode || 500);
   }
@@ -3250,7 +3273,7 @@ app.get("/auth/me", async (req, reply) => {
         email: user.email,
         is_guest: user.isGuest,
       },
-      profile,
+      profile: memberProfile(profile),
       settings: accountSettings?.settings || {},
       settings_storage: accountSettings?.storage || "unavailable",
       settings_warning: accountSettings?.warning || null,
@@ -3305,7 +3328,7 @@ app.get("/auth/profile", async (req, reply) => {
   try {
     const user = await getRequiredAuthUser(req);
     const profile = await getProfileForUser(user);
-    ok(reply, { success: true, profile });
+    ok(reply, { success: true, profile: memberProfile(profile) });
   } catch (e) {
     fail(reply, e, 401);
   }
@@ -3328,7 +3351,7 @@ app.patch("/auth/profile", async (req, reply) => {
       avatar_url: str(body.avatar_url) || null,
     });
 
-    ok(reply, { success: true, profile: saved });
+    ok(reply, { success: true, profile: memberProfile(saved) });
   } catch (e) {
     fail(reply, e, 401);
   }
@@ -3443,7 +3466,7 @@ app.post("/auth/accept-legal", async (req, reply) => {
 
     ok(reply, {
       success: true,
-      profile: saved,
+      profile: memberProfile(saved),
       accepted: hasCurrentLegalAcceptance(saved),
     });
   } catch (e) {
@@ -4331,7 +4354,7 @@ function verifyStripeWebhookSignature(rawBody: string, signatureHeader: string) 
 
 app.get("/billing/plans", async (_req, reply) => { try { const products = await subscriptionProducts(); ok(reply, { success: true, plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products) }); } catch (e) { fail(reply, e, 503); } });
 
-app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = await getUserEntitlements(user, profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); const products = await subscriptionProducts(); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile, entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products), plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
+app.get("/billing/me", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const entitlements = await getUserEntitlements(user, profile); const ai_usage = await getAiUsageStatus(user, profile).catch(() => null); const products = await subscriptionProducts(); ok(reply, { success: true, user: { id: user.id, email: user.email }, profile: memberProfile(profile), entitlements, ai_usage, beta_manual_plan_access: BETA_MANUAL_PLAN_ACCESS, stripe_configured: !!STRIPE_SECRET_KEY, prices_configured: stripePricesConfigured(products), plans: publicPlanCatalog(products), plan_order: PUBLIC_PLAN_ORDER }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 app.get("/billing/usage", async (req, reply) => { try { const user = await getRequiredAuthUser(req); const profile = await getBillingProfile(user); const ai_usage = await getAiUsageStatus(user, profile); ok(reply, { success: true, ai_usage, entitlements: ai_usage.entitlements }); } catch (e) { fail(reply, e, (e as any)?.statusCode || 500); } });
 
 app.post("/billing/checkout", async (req, reply) => {
