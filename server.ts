@@ -3334,35 +3334,11 @@ app.patch("/auth/profile", async (req, reply) => {
   }
 });
 
-app.get("/auth/export-data", async (req, reply) => {
-  try {
-    const user = await getRequiredAuthUser(req);
-    const profile = await getProfileForUser(user);
-    const accountSettings = await getAccountSettingsForUser(user).catch(() => null);
-    const catches = await listUserCatches(user, 1000).catch(() => []);
-    const savedAreas = await listSavedAreasForUser(user, 1000).catch(() => []);
-    const community = await listCommunityPostsForUser(user, "").catch(() => ({ posts: [] as CommunityPostRow[], storage: "unavailable" }));
-    const feedback = supabase
-      ? await supabase.from(FEEDBACK_TABLE).select("id,type,message,page,status,created_at,updated_at").eq("user_id", user.id).limit(1000).then((r) => r.data || []).catch(() => [])
-      : mem.feedback.filter((row) => row.user_id === user.id || row.user_email === user.email);
-    const aiChats = await listAiChatSessionsForUser(user, 500).catch(() => []);
-    const rewards = await listRewardLedger(user, 5000).catch(() => ({ rows: [] as RewardLedgerRow[], storage: "unavailable" }));
-    ok(reply, {
-      success: true,
-      exported_at: new Date().toISOString(),
-      user: { id: user.id, email: user.email },
-      profile,
-      settings: accountSettings?.settings || {},
-      catches,
-      saved_areas: savedAreas,
-      community_posts: community.posts,
-      feedback,
-      ai_chat_sessions: aiChats,
-      reward_ledger: rewards.rows,
-    });
-  } catch (e) {
-    fail(reply, e, (e as any)?.statusCode || 500);
-  }
+app.get("/auth/export-data", async (_req, reply) => {
+  return reply.header("Cache-Control", "private, no-store").code(503).send({
+    success: false,
+    error: "Account data export is temporarily unavailable. Please try again later or contact OceanCore support for help with your data request.",
+  });
 });
 
 app.delete("/auth/account", async (req, reply) => {
